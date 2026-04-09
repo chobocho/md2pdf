@@ -1,0 +1,6 @@
+fonts/*.ttf
+fonts/*.otf
+__pycache__/
+*.pyc
+*.pdf
+.pytest_cache/
