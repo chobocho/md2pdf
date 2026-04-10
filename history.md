@@ -1,5 +1,14 @@
 # Change History
 
+## 2026-04-10 — TypeScript port (`md2py_web/`)
+
+A new sibling project, `md2py_web/`, ports md2pdf to TypeScript with
+**zero runtime external dependencies** (Node.js built-ins only).
+TDD: 45 tests written before implementation, all passing. Build via
+`./md2py_web/build.sh` which produces a self-contained `release/`
+folder. See [`md2py_web/history.md`](./md2py_web/history.md) for the
+full change list.
+
 ## 2026-04-10 — Web UI, CLI Refactor & Fence Attribute Fix
 
 ### New Features

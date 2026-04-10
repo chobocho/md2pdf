@@ -1,0 +1,19 @@
+{
+  "name": "md2py_web",
+  "version": "0.1.0",
+  "description": "Markdown to printable HTML / PDF — TypeScript port of md2pdf with zero runtime dependencies.",
+  "type": "module",
+  "bin": {
+    "md2py-web": "dist/src/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "tsc && node --test dist/tests/*.test.js",
+    "start": "node dist/src/index.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.39",
+    "typescript": "^5.9.3"
+  },
+  "license": "MIT"
+}

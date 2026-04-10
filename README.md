@@ -89,3 +89,12 @@ License: [SIL Open Font License 1.1](https://scripts.sil.org/OFL)
 ## Platform Notes
 
 Tested on Android/Termux (Linux arm64) and standard Linux (x86_64).
+
+## TypeScript port — `md2py_web/`
+
+A zero-runtime-dependency TypeScript port lives under
+[`md2py_web/`](./md2py_web/README.md). It uses only Node.js built-ins
+(`node:http`, `node:fs`, `node:readline`, `node:test`) and emits
+printable HTML that you can save as PDF from the browser's print
+dialog. Build it with `cd md2py_web && ./build.sh`. See
+[`md2py_web/README.md`](./md2py_web/README.md) for details.
