@@ -1,4 +1,5 @@
 import hashlib
+import io
 import os
 import tempfile
 import unittest
@@ -25,6 +26,57 @@ class TestKoreanMarkdown(unittest.TestCase):
         self.assertIn("제목", result)
         self.assertIn("<h1>", result)
         self.assertIn("<h2>", result)
+
+
+class TestFenceAttributeStripping(unittest.TestCase):
+    """Test that name= attributes in code fences don't corrupt surrounding headings."""
+
+    def _convert(self, md_text):
+        import re
+        import md2pdf
+        # Replicate the preprocessing step from convert_md_to_pdf
+        cleaned = re.sub(
+            r"^([ \t]*(?:```|~~~)\w+)[ \t]+\S.*$", r"\1", md_text, flags=re.MULTILINE
+        )
+        return markdown.markdown(cleaned, extensions=["extra", "toc"])
+
+    def test_name_attr_does_not_swallow_following_heading(self):
+        md = (
+            "## 3.1 Section\n\n"
+            "```yaml name=example.yml\n"
+            "key: value\n"
+            "```\n\n"
+            "## 3.2 Next Section\n"
+        )
+        html = self._convert(md)
+        self.assertIn("3.2", html, "Section 3.2 must appear in output")
+        self.assertIn("<h2", html)
+
+    def test_multiple_named_fences_preserve_all_headings(self):
+        md = (
+            "## 3.1 First\n\n"
+            "```yaml name=a.yml\nk: v\n```\n\n"
+            "## 3.2 Second\n\n"
+            "## 3.3 Third\n\n"
+            "```yaml name=b.yml\nk: v\n```\n\n"
+            "## 3.4 Fourth\n"
+        )
+        html = self._convert(md)
+        for section in ("3.2", "3.3", "3.4"):
+            self.assertIn(section, html, f"Section {section} must appear in output")
+
+    def test_line_count_unchanged_after_stripping(self):
+        import re
+        with open(Path(__file__).parent / "sample.md", encoding="utf-8") as f:
+            text = f.read()
+        fixed = re.sub(
+            r"^([ \t]*(?:```|~~~)\w+)[ \t]+\S.*$", r"\1", text, flags=re.MULTILINE
+        )
+        self.assertEqual(
+            len(text.splitlines()),
+            len(fixed.splitlines()),
+            "Preprocessing must not add or remove lines",
+        )
 
 
 class TestEnsureFont(unittest.TestCase):
@@ -233,6 +285,109 @@ class TestIntegration(unittest.TestCase):
             result = md2pdf.convert_md_to_pdf(str(sample), out_pdf)
             self.assertTrue(result.exists())
             self.assertGreater(result.stat().st_size, 1000)
+
+
+class TestArgParser(unittest.TestCase):
+    """Test the argparse-based CLI."""
+
+    def test_input_only(self):
+        import md2pdf
+        args = md2pdf._build_arg_parser().parse_args(["foo.md"])
+        self.assertEqual(args.input, "foo.md")
+        self.assertFalse(args.webui)
+        self.assertEqual(args.port, 5000)
+
+    def test_webui_with_short_port(self):
+        import md2pdf
+        args = md2pdf._build_arg_parser().parse_args(["--webui", "-p", "8080"])
+        self.assertTrue(args.webui)
+        self.assertEqual(args.port, 8080)
+
+    def test_webui_with_long_port(self):
+        import md2pdf
+        args = md2pdf._build_arg_parser().parse_args(["--webui", "--port", "9000"])
+        self.assertTrue(args.webui)
+        self.assertEqual(args.port, 9000)
+
+    def test_no_args_prints_help(self):
+        import md2pdf
+        with mock.patch("sys.stdout"):
+            rc = md2pdf.main([])
+        self.assertEqual(rc, 0)
+
+    def test_main_dispatches_to_webui(self):
+        import md2pdf
+        with mock.patch("md2pdf.run_webui") as mock_run:
+            md2pdf.main(["--webui", "-p", "1234"])
+        mock_run.assert_called_once_with(port=1234)
+
+
+class TestWebUI(unittest.TestCase):
+    """Test the Flask web UI routes with mocked conversion."""
+
+    def setUp(self):
+        import md2pdf
+        self.md2pdf = md2pdf
+        self.app = md2pdf.create_app()
+        self.client = self.app.test_client()
+
+    def test_index_renders_form(self):
+        resp = self.client.get("/")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_data(as_text=True)
+        self.assertIn("md2pdf", body)
+        self.assertIn('action="/convert"', body)
+        self.assertIn('type="file"', body)
+
+    def test_convert_success(self):
+        def fake_convert(md_path, pdf_path, font_path=None):
+            Path(pdf_path).write_bytes(b"%PDF-1.4 fake pdf bytes")
+            return Path(pdf_path)
+
+        with mock.patch("md2pdf.convert_md_to_pdf", side_effect=fake_convert):
+            data = {"file": (io.BytesIO("# 한국어 제목".encode("utf-8")), "doc.md")}
+            resp = self.client.post(
+                "/convert", data=data, content_type="multipart/form-data"
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.mimetype, "application/pdf")
+        self.assertTrue(resp.data.startswith(b"%PDF"))
+        cd = resp.headers.get("Content-Disposition", "")
+        self.assertIn("doc.pdf", cd)
+
+    def test_convert_rejects_non_md_extension(self):
+        data = {"file": (io.BytesIO(b"not markdown"), "evil.txt")}
+        resp = self.client.post(
+            "/convert", data=data, content_type="multipart/form-data"
+        )
+        self.assertEqual(resp.status_code, 400)
+        body = resp.get_data(as_text=True)
+        self.assertIn("Markdown", body)
+        self.assertIn("에러", body)
+
+    def test_convert_missing_file_shows_error(self):
+        resp = self.client.post(
+            "/convert", data={}, content_type="multipart/form-data"
+        )
+        self.assertEqual(resp.status_code, 400)
+        body = resp.get_data(as_text=True)
+        self.assertIn("업로드", body)
+
+    def test_convert_runtime_error_shows_notification(self):
+        with mock.patch(
+            "md2pdf.convert_md_to_pdf",
+            side_effect=RuntimeError("PDF conversion failed: boom"),
+        ):
+            data = {"file": (io.BytesIO(b"# hi"), "x.md")}
+            resp = self.client.post(
+                "/convert", data=data, content_type="multipart/form-data"
+            )
+
+        self.assertEqual(resp.status_code, 500)
+        body = resp.get_data(as_text=True)
+        self.assertIn("변환 실패", body)
+        self.assertIn("boom", body)
 
 
 if __name__ == "__main__":

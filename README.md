@@ -7,9 +7,10 @@ Convert Markdown files to PDF with Korean language support using [WeasyPrint](ht
 - Python 3.10+
 - weasyprint
 - markdown
+- flask (only required for the Web UI)
 
 ```bash
-pip install weasyprint markdown
+pip install weasyprint markdown flask
 ```
 
 > **Note (Termux / Android):** If weasyprint fails to import, upgrade tinycss2:
@@ -29,6 +30,25 @@ python md2pdf.py input.md output.pdf
 ```
 
 On the **first run**, `NanumGothic-Regular.ttf` is automatically downloaded from Google Fonts into the `fonts/` directory. Subsequent runs use the cached file.
+
+## Web UI
+
+Launch a browser-based upload page that converts uploaded Markdown files to PDF:
+
+```bash
+python md2pdf.py --webui
+# default: http://0.0.0.0:5000
+```
+
+Pick a custom port with `-p` (or `--port`):
+
+```bash
+python md2pdf.py --webui -p 8080
+```
+
+Open the printed URL in a browser, choose a `.md` file, and click **PDF로 변환** — the converted PDF is streamed back as a download. Errors (wrong file type, missing file, conversion failure) are shown as a red banner on the same page **and** logged to stderr.
+
+While the Web UI is running, type `exit` in the console (followed by Enter) to terminate the server cleanly.
 
 ## Offline Use
 

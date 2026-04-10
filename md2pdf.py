@@ -1,7 +1,12 @@
+import argparse
 import hashlib
+import io
 import markdown
 import os
+import re
 import sys
+import tempfile
+import threading
 import urllib.request
 from pathlib import Path
 from weasyprint import HTML, CSS
@@ -80,6 +85,13 @@ def convert_md_to_pdf(md_filepath, pdf_filepath, font_path=None):
 
     with open(md_filepath, "r", encoding="utf-8") as f:
         md_text = f.read()
+
+    # Strip unsupported attributes (e.g. `name=foo.yml`) from fenced code
+    # fence info strings.  Python-Markdown's fenced_code extension only
+    # recognises a single language token; extra key=value pairs cause the
+    # fence NOT to be treated as a code block, which then misparses the
+    # surrounding headings and text.
+    md_text = re.sub(r"^([ \t]*(?:```|~~~)\w+)[ \t]+\S.*$", r"\1", md_text, flags=re.MULTILINE)
 
     html_content = markdown.markdown(md_text, extensions=["extra", "toc"])
 
@@ -179,27 +191,151 @@ def convert_md_to_pdf(md_filepath, pdf_filepath, font_path=None):
     return Path(pdf_filepath)
 
 
-def print_help():
-    print("Usage: python md2pdf.py <input.md> [output.pdf]")
-    print("       Automatically downloads NanumGothic font on first run.")
+FORM_TEMPLATE = """<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>md2pdf — Web UI</title>
+<style>
+  body { font-family: sans-serif; max-width: 640px; margin: 60px auto; padding: 0 20px; color: #222; }
+  h1 { font-size: 1.6em; }
+  .card { border: 1px solid #ddd; border-radius: 8px; padding: 24px; box-shadow: 0 2px 6px rgba(0,0,0,0.04); }
+  .error { background: #fdecea; color: #b3261e; padding: 12px 16px; border: 1px solid #f5c2c0;
+           border-radius: 6px; margin-bottom: 18px; }
+  .ok { background: #e7f5ec; color: #1e7a3c; padding: 12px 16px; border: 1px solid #b9e1c7;
+        border-radius: 6px; margin-bottom: 18px; }
+  input[type=file] { margin: 14px 0; }
+  button { background: #0066cc; color: #fff; border: 0; padding: 10px 18px;
+           border-radius: 6px; font-size: 1em; cursor: pointer; }
+  button:hover { background: #004f9e; }
+  footer { margin-top: 24px; font-size: 0.85em; color: #888; }
+</style>
+</head>
+<body>
+  <h1>md2pdf — Markdown ➜ PDF</h1>
+  <div class="card">
+    {% if error %}<div class="error"><strong>에러:</strong> {{ error }}</div>{% endif %}
+    <form action="/convert" method="post" enctype="multipart/form-data">
+      <label>변환할 Markdown(.md) 파일을 선택하세요.</label><br>
+      <input type="file" name="file" accept=".md,.markdown,text/markdown" required><br>
+      <button type="submit">PDF로 변환</button>
+    </form>
+    <footer>콘솔에서 <code>exit</code> 입력 시 서버가 종료됩니다.</footer>
+  </div>
+</body>
+</html>
+"""
+
+
+def create_app():
+    """Flask app factory for the md2pdf web UI."""
+    from flask import Flask, render_template_string, request, send_file
+    from werkzeug.utils import secure_filename
+
+    app = Flask(__name__)
+    app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16 MB upload cap
+
+    @app.route("/", methods=["GET"])
+    def index():
+        return render_template_string(FORM_TEMPLATE, error=None)
+
+    @app.route("/convert", methods=["POST"])
+    def convert():
+        f = request.files.get("file")
+        if f is None or not f.filename:
+            msg = "파일이 업로드되지 않았습니다."
+            print(f"[webui] {msg}", file=sys.stderr)
+            return render_template_string(FORM_TEMPLATE, error=msg), 400
+
+        name = secure_filename(f.filename) or "upload.md"
+        if not name.lower().endswith((".md", ".markdown")):
+            msg = f"Markdown 파일(.md)만 업로드할 수 있습니다: {f.filename}"
+            print(f"[webui] {msg}", file=sys.stderr)
+            return render_template_string(FORM_TEMPLATE, error=msg), 400
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            md_path = Path(tmpdir) / name
+            pdf_path = md_path.with_suffix(".pdf")
+            f.save(md_path)
+            try:
+                convert_md_to_pdf(str(md_path), str(pdf_path))
+            except FileNotFoundError as e:
+                msg = f"파일을 찾을 수 없습니다: {e}"
+                print(f"[webui] {msg}", file=sys.stderr)
+                return render_template_string(FORM_TEMPLATE, error=msg), 400
+            except Exception as e:
+                msg = f"변환 실패: {e}"
+                print(f"[webui] {msg}", file=sys.stderr)
+                return render_template_string(FORM_TEMPLATE, error=msg), 500
+
+            pdf_bytes = pdf_path.read_bytes()
+
+        return send_file(
+            io.BytesIO(pdf_bytes),
+            mimetype="application/pdf",
+            as_attachment=True,
+            download_name=pdf_path.name,
+        )
+
+    return app
+
+
+def _stdin_exit_monitor():
+    """Watch stdin for an `exit` line and terminate the process."""
+    try:
+        for line in sys.stdin:
+            if line.strip().lower() == "exit":
+                print("[webui] exit requested — shutting down.", flush=True)
+                os._exit(0)
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+
+def run_webui(port: int = 5000, host: str = "0.0.0.0"):
+    """Start the Flask web UI on the given port and watch stdin for `exit`."""
+    app = create_app()
+    threading.Thread(target=_stdin_exit_monitor, daemon=True).start()
+    print(f"[webui] serving on http://{host}:{port}  (type `exit` to quit)", flush=True)
+    app.run(host=host, port=port, debug=False, use_reloader=False)
+
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="md2pdf",
+        description="Convert Markdown to PDF with Korean font support.",
+    )
+    parser.add_argument("input", nargs="?", help="Input Markdown file (.md)")
+    parser.add_argument("output", nargs="?", help="Output PDF file (default: <input>.pdf)")
+    parser.add_argument("--webui", action="store_true", help="Start the web UI server")
+    parser.add_argument("-p", "--port", type=int, default=5000, help="Web UI port (default: 5000)")
+    parser.add_argument("--font", help="Optional explicit .ttf font path")
+    return parser
+
+
+def main(argv=None) -> int:
+    parser = _build_arg_parser()
+    args = parser.parse_args(argv)
+
+    if args.webui:
+        run_webui(port=args.port)
+        return 0
+
+    if not args.input:
+        parser.print_help()
+        return 0
+
+    output_file = args.output or args.input.replace(".md", ".pdf")
+    try:
+        result = convert_md_to_pdf(args.input, output_file, font_path=args.font)
+        print(f"PDF saved: {result}")
+        return 0
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print_help()
-        sys.exit(0)
-
-    input_file = sys.argv[1]
-    output_file = (
-        sys.argv[2] if len(sys.argv) >= 3 else input_file.replace(".md", ".pdf")
-    )
-
-    try:
-        result = convert_md_to_pdf(input_file, output_file)
-        print(f"PDF saved: {result}")
-    except FileNotFoundError as e:
-        print(f"Error: {e}")
-        sys.exit(1)
-    except RuntimeError as e:
-        print(f"Error: {e}")
-        sys.exit(1)
+    sys.exit(main())
