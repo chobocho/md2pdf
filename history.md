@@ -1,5 +1,12 @@
 # Change History
 
+## 2026-04-10 — sample.md 손상 버그 수정
+
+`751d57c` 커밋 이후 `sample.md`가 null bytes(0x00)로 완전히 손상되어 PDF 변환이 실패하는 버그 수정.
+원인: 외부 요인으로 파일이 덮어써진 것으로 추정 (md2py_web 빌드 스크립트는 sample.md를 건드리지 않음).
+`git restore sample.md`로 직전 커밋의 정상 파일(1,525줄)을 복원.
+전체 29개 테스트 통과 확인.
+
 ## 2026-04-10 — TypeScript port (`md2py_web/`)
 
 A new sibling project, `md2py_web/`, ports md2pdf to TypeScript with
