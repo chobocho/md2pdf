@@ -339,6 +339,18 @@ class TestWebUI(unittest.TestCase):
         self.assertIn('action="/convert"', body)
         self.assertIn('type="file"', body)
 
+    def test_index_is_mobile_friendly(self):
+        resp = self.client.get("/")
+        body = resp.get_data(as_text=True)
+        self.assertIn('name="viewport"', body)
+        self.assertIn("width=device-width", body)
+
+    def test_index_has_drag_and_drop_zone(self):
+        resp = self.client.get("/")
+        body = resp.get_data(as_text=True)
+        self.assertIn("drop-zone", body)
+        self.assertIn("dragover", body)
+
     def test_convert_success(self):
         def fake_convert(md_path, pdf_path, font_path=None):
             Path(pdf_path).write_bytes(b"%PDF-1.4 fake pdf bytes")

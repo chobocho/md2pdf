@@ -1,5 +1,19 @@
 # Change History
 
+## 2026-05-03 — 웹 UI 모바일 친화 디자인 개편
+
+`--webui` 모드의 업로드 페이지(`FORM_TEMPLATE`)를 모던 모바일 스타일로 재구성.
+
+- `viewport` 메타 태그 추가로 모바일에서 1:1 스케일 렌더링.
+- 시스템 폰트 스택(-apple-system / Segoe UI / Noto Sans KR / Apple SD Gothic Neo) 적용으로 iOS·Android 네이티브 느낌.
+- 그라디언트 hero 카드 + 둥근 모서리(`--radius: 18px`) + soft shadow로 카드형 레이아웃 구성.
+- 드래그 앤 드롭 영역(`#drop-zone`) 추가: `dragover` 상태에서 강조, 파일 드롭/탭 모두 지원, 선택된 파일명/용량 표시.
+- 터치 친화 제출 버튼(min-height 52px, 그라디언트, active 시 누름 효과).
+- `prefers-color-scheme: dark` 미디어 쿼리로 다크 모드 자동 대응.
+- 안전 영역(env(safe-area-inset-*)) 패딩으로 노치/홈 인디케이터 회피.
+
+TDD: `TestWebUI`에 `test_index_is_mobile_friendly`, `test_index_has_drag_and_drop_zone` 두 케이스 추가 후 구현. 기존 라우트 동작과 한국어 에러 문구(`에러`, `업로드`, `변환 실패`)는 그대로 유지하여 회귀 없음.
+
 ## 2026-04-10 — sample.md 손상 버그 수정
 
 `751d57c` 커밋 이후 `sample.md`가 null bytes(0x00)로 완전히 손상되어 PDF 변환이 실패하는 버그 수정.
