@@ -143,7 +143,10 @@ def _preprocess_markdown(md_text: str) -> str:
        info strings (python-markdown's fenced_code only recognises a single
        language token).
     2. Convert GitHub-flavored task list markers `- [ ]` / `- [x]` into
-       inline disabled checkboxes — python-markdown has no native support.
+       a styled `<span class="taskbox">` (checked variants get an extra
+       class). We avoid `<input type="checkbox">` because WeasyPrint renders
+       the form control with a wide default size that pushes the label
+       text onto the next line.
     3. Normalise XHTML self-closing `<div class="page"/>` to HTML5 closing
        form so the page-break CSS actually fires (HTML5 ignores the trailing
        `/` and would otherwise wrap the rest of the document in the div).
@@ -158,12 +161,12 @@ def _preprocess_markdown(md_text: str) -> str:
     )
     md_text = re.sub(
         r"^([ \t]*[-*+])[ \t]+\[ \][ \t]+",
-        r'\1 <input type="checkbox" disabled> ',
+        r'\1 <span class="taskbox"></span> ',
         md_text, flags=re.MULTILINE,
     )
     md_text = re.sub(
         r"^([ \t]*[-*+])[ \t]+\[[xX]\][ \t]+",
-        r'\1 <input type="checkbox" disabled checked> ',
+        r'\1 <span class="taskbox checked"></span> ',
         md_text, flags=re.MULTILINE,
     )
     return md_text
@@ -397,9 +400,30 @@ def _build_css(font_uris: dict, *, page_numbers: bool = True) -> str:
         margin-top: 0.25em;
     }}
 
-    li input[type="checkbox"] {{
-        margin-right: 0.5em;
-        vertical-align: middle;
+    .taskbox {{
+        display: inline-block;
+        width: 0.85em;
+        height: 0.85em;
+        margin-right: 0.4em;
+        vertical-align: -0.05em;
+        border: 1.5px solid #59636e;
+        border-radius: 3px;
+        background: #fff;
+        line-height: 1;
+        text-align: center;
+        font-size: 0.95em;
+    }}
+
+    .taskbox.checked {{
+        background: #0969da;
+        border-color: #0969da;
+        color: #fff;
+    }}
+
+    .taskbox.checked::before {{
+        content: "✓";
+        font-weight: bold;
+        font-size: 0.85em;
     }}
 
     sup {{

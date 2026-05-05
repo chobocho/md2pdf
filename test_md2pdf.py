@@ -659,56 +659,110 @@ class TestFootnotes(unittest.TestCase):
 
 
 class TestTaskList(unittest.TestCase):
-    """GitHub-style task lists: `- [ ]` / `- [x]` render as disabled checkboxes."""
+    """GitHub-style task lists: `- [ ]` / `- [x]` render as inline checkbox
+    glyphs. We use a styled `<span class="taskbox">` instead of `<input
+    type="checkbox">` because WeasyPrint (a print-target engine) does not
+    reliably render form controls inline — the default `<input>` width pushes
+    the label text to the next line."""
 
-    def test_unchecked_renders_disabled_checkbox(self):
+    def test_unchecked_renders_taskbox_span(self):
         import md2pdf
         html = md2pdf._render_html("- [ ] todo\n")
-        self.assertIn('type="checkbox"', html)
-        self.assertIn('disabled', html)
-        self.assertNotIn('checked', html)
+        self.assertIn('class="taskbox"', html)
+        self.assertNotIn('class="taskbox checked"', html)
         self.assertIn('todo', html)
 
-    def test_checked_renders_disabled_checked_checkbox(self):
+    def test_checked_renders_taskbox_checked_span(self):
         import md2pdf
         html = md2pdf._render_html("- [x] done\n")
-        self.assertIn('type="checkbox"', html)
-        self.assertIn('disabled', html)
-        self.assertIn('checked', html)
+        self.assertIn('class="taskbox checked"', html)
         self.assertIn('done', html)
 
     def test_uppercase_X_also_checked(self):
         import md2pdf
         html = md2pdf._render_html("- [X] done\n")
-        self.assertIn('checked', html)
+        self.assertIn('class="taskbox checked"', html)
 
     def test_asterisk_marker_also_supported(self):
         import md2pdf
         html = md2pdf._render_html("* [ ] todo\n")
-        self.assertIn('type="checkbox"', html)
+        self.assertIn('class="taskbox"', html)
 
     def test_indented_task_supported(self):
         import md2pdf
         html = md2pdf._render_html("  - [ ] indented\n")
-        self.assertIn('type="checkbox"', html)
+        self.assertIn('class="taskbox"', html)
         self.assertIn('indented', html)
 
     def test_korean_task_text_preserved(self):
         import md2pdf
         html = md2pdf._render_html("- [x] 한국어 작업 완료\n")
         self.assertIn('한국어 작업 완료', html)
-        self.assertIn('checked', html)
+        self.assertIn('class="taskbox checked"', html)
 
     def test_regular_list_unaffected(self):
         import md2pdf
         html = md2pdf._render_html("- normal item\n")
-        self.assertNotIn('type="checkbox"', html)
+        self.assertNotIn('taskbox', html)
 
     def test_bracket_text_in_paragraph_unaffected(self):
         """`[foo]` syntax in regular text must not be misread as a task box."""
         import md2pdf
         html = md2pdf._render_html("Talk about [foo] and [bar].\n")
-        self.assertNotIn('type="checkbox"', html)
+        self.assertNotIn('taskbox', html)
+
+    def test_no_form_input_emitted(self):
+        """Regression: must NOT emit `<input type="checkbox">` because
+        WeasyPrint renders the form control with default block-ish width,
+        wrapping the label text onto the next line."""
+        import md2pdf
+        html = md2pdf._render_html("- [ ] one\n- [x] two\n")
+        self.assertNotIn('<input', html)
+
+    def test_taskbox_and_label_in_same_li(self):
+        """The span and the text after it must end up in the same `<li>`
+        without a line break between them."""
+        import md2pdf
+        html = md2pdf._render_html("- [ ] todo\n")
+        m = re.search(r"<li>(.*?)</li>", html, re.DOTALL)
+        self.assertIsNotNone(m, "Expected a <li> in output")
+        body = m.group(1)
+        self.assertIn('taskbox', body)
+        self.assertIn('todo', body)
+        # No `<br>` or block-level break separating the marker from the label
+        self.assertNotIn('<br', body)
+        self.assertNotIn('<p>', body)
+
+
+class TestTaskListCSS(unittest.TestCase):
+    """CSS for `.taskbox` must give it a small, fixed inline-block size so
+    WeasyPrint renders the marker and the label on the same line."""
+
+    def _css(self):
+        import md2pdf
+        return md2pdf._build_css({
+            "regular": "file:///r.ttf",
+            "bold": "file:///b.ttf",
+            "code": "file:///c.ttf",
+        })
+
+    def test_taskbox_rule_exists(self):
+        css = self._css()
+        self.assertIn(".taskbox", css)
+
+    def test_taskbox_is_inline_block_with_em_size(self):
+        css = self._css()
+        m = re.search(r"\.taskbox\s*\{([^}]+)\}", css)
+        self.assertIsNotNone(m, ".taskbox rule must exist")
+        body = m.group(1)
+        self.assertIn("inline-block", body)
+        # Width must be a small em-relative size, NOT default ~200px <input> width
+        self.assertRegex(body, r"width\s*:\s*0?\.\d+\s*em")
+        self.assertRegex(body, r"height\s*:\s*0?\.\d+\s*em")
+
+    def test_taskbox_checked_has_distinct_style(self):
+        css = self._css()
+        self.assertRegex(css, r"\.taskbox\.checked")
 
 
 class TestPageNumbers(unittest.TestCase):

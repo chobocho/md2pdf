@@ -1,5 +1,24 @@
 # Change History
 
+## 2026-05-05 — 태스크 리스트 체크박스 줄바꿈 버그 수정
+
+### 증상
+`- [ ] 텍스트` / `- [x] 텍스트`가 PDF에서 체크박스 다음 글자가 한 줄 아래로 출력됨.
+
+### 원인
+전처리 단계에서 `<input type="checkbox" disabled>` HTML로 변환했는데, WeasyPrint는 인쇄 매체 엔진이라 폼 컨트롤 지원이 약함. `<input>`이 기본 너비(폼 텍스트 입력 기본값 ~200px)로 렌더링되어 옆 텍스트가 다음 줄로 밀려남.
+
+### 수정
+1. 전처리: `<input type="checkbox" disabled>` → `<span class="taskbox"></span>`
+   - 체크된 항목은 `<span class="taskbox checked"></span>`
+2. CSS: `.taskbox`를 `display: inline-block`, `width/height: 0.85em`로 고정 → 항상 인라인 작은 박스로 렌더
+3. `.taskbox.checked::before { content: "✓" }`로 체크 표시 (GitHub 스타일 파란 배경)
+
+### TDD
+1. `TestTaskList` 7건 갱신 + 2건 추가 (`test_no_form_input_emitted`, `test_taskbox_and_label_in_same_li`)
+2. `TestTaskListCSS` 3건 신규 (rule 존재, inline-block + em 사이즈, checked 스타일)
+3. 구현 후 13건 모두 GREEN, 전체 회귀 없음 (기존 113건 중 무관한 1건 사전 실패만 잔존)
+
 ## 2026-05-05 — 코드 블록 긴 라인 줄바꿈 (clip 방지)
 
 ### 증상
