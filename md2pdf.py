@@ -431,6 +431,13 @@ def _build_css(font_uris: dict, *, page_numbers: bool = True) -> str:
         page-break-after: always;
     }}
 
+    /* Pygments' default style paints Error tokens with a red border, which
+       turns symbols like `<`, `>` (and anything the lexer can't classify)
+       into random red boxes in the PDF. Disable it. */
+    .codehilite .err {{
+        border: none;
+    }}
+
     @page {{
         margin: 2cm;
         {page_number_rule}

@@ -1,5 +1,35 @@
 # Change History
 
+## 2026-05-05 — 코드 출력의 빨간 테두리 버그 수정 (Pygments `.err` 토큰)
+
+### 증상
+PDF의 코드 블록에서 `<`, `>` 같은 기호 일부가 빨간 테두리 박스로 둘러싸여 표시됨.
+
+### 원인
+Pygments `default` 스타일의 Error 토큰 규칙:
+```css
+.codehilite .err { border: 1px solid #F00 }
+```
+어휘 분석기가 분류하지 못한 토큰(`.err` 클래스)에 빨간 테두리를 그림. CSS 비교 연산자(`x < 100`), TOML placeholder(`<YOUR_TOKEN>`) 등에서 자주 발생.
+
+### 수정
+`_build_css` 출력 끝쪽에 오버라이드 규칙 추가:
+```css
+.codehilite .err { border: none; }
+```
+Pygments 기본 규칙보다 뒤에 위치 → 같은 specificity에서 cascade 우선순위로 승. Pygments 출력은 그대로 두고 우리는 명시적으로 무력화 → 향후 Pygments 스타일 변경에도 견고.
+
+### TDD
+1. `TestGitHubStyleCSS.test_codehilite_err_token_has_no_red_border` 추가 (RED)
+   - 마지막 `.codehilite .err` 규칙이 `border: none|0|unset` 매칭 보장
+2. `_build_css`에 오버라이드 추가 후 GREEN
+
+### 검증
+- `python -m unittest test_md2pdf` → **107 tests OK**
+- 재현 케이스 `/tmp/err_real.md`:
+  - CSS `if x < 100` + TOML `<YOUR_TOKEN>` → `.err` 7개 토큰 확인
+  - 수정 후 PDF에 빨간 테두리 없음 (오버라이드 규칙 활성)
+
 ## 2026-05-05 — Web UI에 변환 진행 overlay/스피너 추가
 
 업로드 후 변환이 진행되는 동안 사용자에게 시각 피드백을 주기 위해 모달 overlay와 회전 스피너를 표시. 변환 완료 시 자동 다운로드 + overlay 사라짐.

@@ -335,6 +335,21 @@ class TestGitHubStyleCSS(unittest.TestCase):
         css = self._css()
         self.assertIn("pre code", css)
 
+    def test_codehilite_err_token_has_no_red_border(self):
+        """Pygments' default style boxes Error tokens (often `<`, `>`, etc.
+        in code the lexer can't fully tokenise) with `border: 1px solid
+        #FF0000`. That paints random red squares in PDFs. Our override
+        must neutralise the border on the cascade-winning rule."""
+        css = self._css()
+        matches = list(re.finditer(r"\.codehilite\s+\.err\s*\{([^}]+)\}", css))
+        self.assertGreaterEqual(len(matches), 1, "Need a .codehilite .err rule")
+        last_body = matches[-1].group(1)
+        self.assertRegex(
+            last_body,
+            r"border\s*:\s*(none|0\b|unset)",
+            f"Last .codehilite .err rule must drop the border, got: {last_body!r}",
+        )
+
     def test_table_has_zebra_striping(self):
         self.assertIn("nth-child", self._css())
 
