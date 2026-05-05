@@ -1,5 +1,32 @@
 # Change History
 
+## 2026-05-05 — 코드 블록 긴 라인 줄바꿈 (clip 방지)
+
+### 증상
+PDF 코드 블록의 긴 라인(URL, 긴 파라미터 호출 등)이 페이지 오른쪽 밖으로 나가 잘려 보임. 인쇄 매체엔 가로 스크롤이 없으므로 `overflow: auto`만으로는 보이지 않음.
+
+### 원인
+`pre` 규칙이 두 가지 부족:
+1. `white-space: pre`(`<pre>` 기본값)이라 긴 라인이 줄바꿈 안 됨
+2. body의 `word-break: keep-all` 상속 → 단어 중간에서도 끊지 않음
+
+### 수정 (`pre` 규칙 3가지 변경)
+- `overflow: auto` 제거 (PDF에선 무용)
+- `white-space: pre-wrap` — 들여쓰기/개행 보존하면서 라인은 자동 줄바꿈
+- `word-break: normal` — body의 `keep-all` 명시적 오버라이드
+- `overflow-wrap: break-word` — 공백 없는 긴 토큰(URL 등)도 끊어 줄바꿈
+
+### TDD
+1. `TestGitHubStyleCSS.test_pre_block_wraps_long_lines` 추가 (RED 1)
+   - `pre-wrap`, `word-break: normal`, `overflow-wrap: break-word|anywhere` 보장
+2. `pre` 규칙 갱신 후 GREEN
+
+### 검증
+- `python -m unittest test_md2pdf` → **108 tests OK**
+- 통합 케이스 `/tmp/long_test.md`: 페이지 폭을 훨씬 넘는 URL(`query1...query5`) + 한국어 긴 echo
+  - 수정 전: 페이지 우측에서 잘려 `query5=value5` 등 누락
+  - 수정 후: PDF 추출 텍스트에 `query5=value5` 완전 포함 ✅ — 줄바꿈됨
+
 ## 2026-05-05 — 코드 출력의 빨간 테두리 버그 수정 (Pygments `.err` 토큰)
 
 ### 증상

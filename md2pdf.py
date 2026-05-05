@@ -336,7 +336,9 @@ def _build_css(font_uris: dict, *, page_numbers: bool = True) -> str:
         line-height: 1.45;
         font-size: 85%;
         margin-bottom: 16px;
-        overflow: auto;
+        white-space: pre-wrap;
+        word-break: normal;
+        overflow-wrap: break-word;
     }}
 
     pre code {{

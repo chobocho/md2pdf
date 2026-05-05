@@ -331,6 +331,22 @@ class TestGitHubStyleCSS(unittest.TestCase):
         self.assertIn("background", body)
         self.assertIn("padding", body)
 
+    def test_pre_block_wraps_long_lines(self):
+        """Without wrapping, long code lines get clipped off the right edge
+        of the PDF page (no horizontal scroll exists in print). The pre
+        rule must (a) preserve newlines/indent via `pre-wrap`, (b) override
+        body's `word-break: keep-all`, and (c) allow breaking inside long
+        unbreakable tokens like URLs."""
+        body = self._block(self._css(), "pre")
+        self.assertIsNotNone(body)
+        self.assertIn("pre-wrap", body)
+        self.assertRegex(body, r"word-break\s*:\s*normal")
+        self.assertRegex(
+            body,
+            r"overflow-wrap\s*:\s*(break-word|anywhere)",
+            f"pre must enable in-token wrapping, got: {body!r}",
+        )
+
     def test_pre_code_resets_background(self):
         css = self._css()
         self.assertIn("pre code", css)
