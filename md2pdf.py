@@ -716,6 +716,37 @@ FORM_TEMPLATE = """<!doctype html>
     color: var(--text);
   }
 
+  .overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 17, 21, 0.55);
+    -webkit-backdrop-filter: blur(3px);
+    backdrop-filter: blur(3px);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 18px;
+    z-index: 1000;
+    animation: fade-in 0.15s ease;
+  }
+  .overlay[hidden] { display: none; }
+  .spinner {
+    width: 52px; height: 52px;
+    border: 4px solid rgba(255,255,255,0.18);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+  }
+  .overlay-text {
+    color: #fff;
+    font-size: 16px;
+    font-weight: 500;
+    letter-spacing: -0.01em;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes fade-in { from { opacity: 0 } to { opacity: 1 } }
+
   button.submit {
     width: 100%;
     margin-top: 16px;
@@ -786,6 +817,11 @@ FORM_TEMPLATE = """<!doctype html>
     </div>
   </main>
 
+  <div id="overlay" class="overlay" hidden aria-hidden="true">
+    <div class="spinner" role="status" aria-label="변환 중"></div>
+    <div class="overlay-text">변환 중...</div>
+  </div>
+
   <script>
     (function () {
       var dz = document.getElementById('drop-zone');
@@ -823,6 +859,62 @@ FORM_TEMPLATE = """<!doctype html>
           showName(dt.files[0]);
         }
       });
+
+      var form = document.getElementById('upload-form');
+      var overlay = document.getElementById('overlay');
+      var overlayText = overlay && overlay.querySelector('.overlay-text');
+
+      function parseFilename(headerValue) {
+        if (!headerValue) return 'output.pdf';
+        // RFC 5987 form: filename*=UTF-8''<percent-encoded>
+        var star = headerValue.match(/filename\\*=UTF-8''([^;]+)/i);
+        if (star) {
+          try { return decodeURIComponent(star[1]); } catch (e) {}
+        }
+        var plain = headerValue.match(/filename="?([^";]+)"?/i);
+        return plain ? plain[1].trim() : 'output.pdf';
+      }
+
+      if (form && overlay) {
+        form.addEventListener('submit', function (e) {
+          // Need a file selected; let HTML5 'required' validation handle empty.
+          if (!input.files || !input.files.length) return;
+
+          e.preventDefault();
+          overlay.hidden = false;
+          overlayText.textContent = '변환 중...';
+
+          var fd = new FormData(form);
+          fetch('/convert', { method: 'POST', body: fd })
+            .then(function (r) {
+              if (!r.ok) {
+                // Server returned an HTML error page; replace the document.
+                return r.text().then(function (html) {
+                  document.open();
+                  document.write(html);
+                  document.close();
+                });
+              }
+              var name = parseFilename(r.headers.get('Content-Disposition'));
+              return r.blob().then(function (blob) {
+                var url = URL.createObjectURL(blob);
+                var a = document.createElement('a');
+                a.href = url;
+                a.download = name;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+                overlayText.textContent = '완료!';
+                setTimeout(function () { overlay.hidden = true; }, 500);
+              });
+            })
+            .catch(function (err) {
+              overlay.hidden = true;
+              alert('변환 실패: ' + (err && err.message ? err.message : err));
+            });
+        });
+      }
     })();
   </script>
 </body>

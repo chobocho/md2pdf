@@ -1115,6 +1115,30 @@ class TestWebUI(unittest.TestCase):
         self.assertIn("drop-zone", body)
         self.assertIn("dragover", body)
 
+    def test_index_has_loading_overlay_markup(self):
+        """An overlay with a spinner must be present in the HTML so JS can
+        toggle it during conversion."""
+        resp = self.client.get("/")
+        body = resp.get_data(as_text=True)
+        self.assertIn('id="overlay"', body)
+        self.assertIn("spinner", body)
+        # Korean progress text — not just an icon
+        self.assertIn("변환 중", body)
+
+    def test_index_has_spin_keyframes(self):
+        resp = self.client.get("/")
+        body = resp.get_data(as_text=True)
+        self.assertIn("@keyframes spin", body)
+
+    def test_index_intercepts_form_submit_with_fetch(self):
+        """On submit JS must call fetch('/convert') and prevent the default
+        full-page navigation so the overlay can stay visible."""
+        resp = self.client.get("/")
+        body = resp.get_data(as_text=True)
+        self.assertIn("preventDefault", body)
+        self.assertIn("fetch", body)
+        self.assertIn("/convert", body)
+
     def test_index_has_page_numbers_checkbox(self):
         resp = self.client.get("/")
         body = resp.get_data(as_text=True)

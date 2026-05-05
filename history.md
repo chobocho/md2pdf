@@ -1,5 +1,52 @@
 # Change History
 
+## 2026-05-05 — Web UI에 변환 진행 overlay/스피너 추가
+
+업로드 후 변환이 진행되는 동안 사용자에게 시각 피드백을 주기 위해 모달 overlay와 회전 스피너를 표시. 변환 완료 시 자동 다운로드 + overlay 사라짐.
+
+### 변경 사항
+
+#### HTML
+- `<main>` 다음에 `<div id="overlay" class="overlay" hidden>` 추가
+- 내부에 `.spinner`(회전 원)와 `.overlay-text`("변환 중...") 배치
+- `aria-hidden`, `role="status"`, `aria-label`로 접근성 표시
+
+#### CSS
+- `.overlay`: position: fixed, 반투명 검정 + backdrop-filter blur, z-index 1000, fade-in 애니메이션
+- `.spinner`: 52×52 원, 4px 테두리, top만 accent 컬러, 0.9s linear spin
+- `@keyframes spin`, `@keyframes fade-in`
+
+#### JS
+- 기존 IIFE에 폼 submit 가로채기 추가
+- `fetch('/convert', { method: 'POST', body: FormData })` AJAX 변환
+- 응답 분기:
+  - **OK**: `Content-Disposition` 헤더에서 파일명 파싱 (RFC 5987 `filename*=UTF-8''<percent>` 우선, 일반 `filename="..."` fallback) → `URL.createObjectURL(blob)` + 임시 `<a download>` 클릭으로 다운로드 트리거 → "완료!" 표시 후 0.5s 뒤 overlay 숨김
+  - **에러 (4xx/5xx)**: 응답 HTML 본문으로 `document.write` 페이지 교체 → 기존 빨간 배너 동작 유지
+  - **네트워크 예외**: alert + overlay 즉시 숨김
+- 파일 미선택 시 `e.preventDefault()` 안 하고 HTML5 `required` 검증에 위임
+
+### 설계 결정 — 일반 form submit 대신 AJAX
+- 표준 form submit은 다운로드 시작 시점을 JS가 알 수 없음 → overlay를 안전히 숨길 방법 없음
+- AJAX는 응답 도착 시점이 명확 → 정확히 다운로드 트리거 + overlay 종료 가능
+- 단점: JS 미사용 환경에서는 작동 안 함. 단, form `action="/convert"`는 그대로 두어 noscript 시 표준 submit으로 fallback
+
+### TDD
+1. `TestWebUI` +3 (RED 3):
+   - `test_index_has_loading_overlay_markup`: `id="overlay"`, `spinner`, `변환 중` 존재
+   - `test_index_has_spin_keyframes`: `@keyframes spin` 존재
+   - `test_index_intercepts_form_submit_with_fetch`: `preventDefault`, `fetch`, `/convert` 존재
+2. HTML/CSS/JS 추가 후 GREEN
+
+### 검증
+- `python -m unittest test_md2pdf` → **106 tests OK** (+3)
+- 라이브 dev server 스모크 테스트 (port 5099):
+  - `GET /`: overlay/spinner/keyframes/preventDefault/fetch 모두 응답 HTML에 노출 ✅
+  - `POST /convert` (multipart, page_numbers=on): 200 OK, application/pdf, 7.6KB 정상 ✅
+- 시각 확인 (애니메이션, blur, fade-in): CLI 환경이라 직접 검증 불가 — 브라우저에서 사용자 확인 필요
+
+### 부수 정리
+- `filename\*=` 정규식의 Python SyntaxWarning 제거: 백슬래시 escape (`\\*`)
+
 ## 2026-05-05 — [T8] 사용자 커스텀 CSS 주입 (CLI + Web UI)
 
 VSCode `markdown-pdf.styles` 옵션 대응. 사용자가 `--css custom.css`(CLI) 또는 폼 업로드(Web UI)로 추가 스타일시트를 전달하면 기본 CSS **뒤**에 cascade되어 부분 덮어쓰기 가능.
