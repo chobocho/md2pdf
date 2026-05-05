@@ -1,8 +1,10 @@
 import hashlib
 import io
 import os
+import re
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest import mock
 
@@ -79,8 +81,21 @@ class TestFenceAttributeStripping(unittest.TestCase):
         )
 
 
+class _FakeResp:
+    """Minimal context-manager stand-in for `urllib.request.urlopen()`."""
+    def __init__(self, data):
+        self._data = data
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        pass
+    def read(self):
+        return self._data
+
+
 class TestEnsureFont(unittest.TestCase):
-    """Test ensure_font() behavior."""
+    """ensure_font() — backwards-compatible single-font alias for the
+    NanumGothic Regular weight."""
 
     def test_returns_existing_font(self):
         import md2pdf
@@ -89,60 +104,63 @@ class TestEnsureFont(unittest.TestCase):
             fake_font = fonts_dir / md2pdf.FONT_FILENAME
             fake_font.write_bytes(b"fake font data")
 
-            with mock.patch("urllib.request.urlretrieve") as mock_dl:
+            with mock.patch("urllib.request.urlopen") as mock_open:
                 result = md2pdf.ensure_font(fonts_dir=fonts_dir)
 
-            mock_dl.assert_not_called()
+            mock_open.assert_not_called()
             self.assertEqual(result, fake_font)
 
     def test_downloads_when_missing(self):
         import md2pdf
+        data = b"font data"
+        spec = md2pdf.FontResource(
+            filename="reg.ttf", url="https://x/r",
+            sha256=hashlib.sha256(data).hexdigest(),
+        )
         with tempfile.TemporaryDirectory() as tmpdir:
             fonts_dir = Path(tmpdir)
-            dest = fonts_dir / md2pdf.FONT_FILENAME
-
-            def fake_download(url, path):
-                Path(path).write_bytes(b"font data")
-
-            with mock.patch("urllib.request.urlretrieve", side_effect=fake_download):
-                with mock.patch("md2pdf._verify_sha256", return_value=True):
-                    result = md2pdf.ensure_font(fonts_dir=fonts_dir)
+            with mock.patch.dict(
+                md2pdf.FONT_RESOURCES, {"regular": spec}, clear=True
+            ), mock.patch("urllib.request.urlopen", return_value=_FakeResp(data)):
+                result = md2pdf.ensure_font(fonts_dir=fonts_dir)
 
             self.assertTrue(result.exists())
+            self.assertEqual(result.read_bytes(), data)
 
-    def test_sha256_mismatch_raises_and_cleans_up(self):
+    def test_sha256_mismatch_raises_and_does_not_write(self):
         import md2pdf
+        spec = md2pdf.FontResource(
+            filename="reg.ttf", url="https://x/r",
+            sha256="0" * 64,  # intentionally wrong
+        )
         with tempfile.TemporaryDirectory() as tmpdir:
             fonts_dir = Path(tmpdir)
-            dest = fonts_dir / md2pdf.FONT_FILENAME
-
-            def fake_download(url, path):
-                Path(path).write_bytes(b"corrupted data")
-
-            with mock.patch("urllib.request.urlretrieve", side_effect=fake_download):
-                with mock.patch("md2pdf._verify_sha256", return_value=False):
-                    with self.assertRaises(RuntimeError) as ctx:
-                        md2pdf.ensure_font(fonts_dir=fonts_dir)
-
-            self.assertIn("integrity check failed", str(ctx.exception))
-            self.assertFalse(dest.exists())
-
-    def test_download_failure_cleans_up(self):
-        import md2pdf
-        with tempfile.TemporaryDirectory() as tmpdir:
-            fonts_dir = Path(tmpdir)
-            dest = fonts_dir / md2pdf.FONT_FILENAME
-
-            def failing_download(url, path):
-                Path(path).write_bytes(b"partial")
-                raise OSError("Network error")
-
-            with mock.patch("urllib.request.urlretrieve", side_effect=failing_download):
+            with mock.patch.dict(
+                md2pdf.FONT_RESOURCES, {"regular": spec}, clear=True
+            ), mock.patch(
+                "urllib.request.urlopen", return_value=_FakeResp(b"actual data")
+            ):
                 with self.assertRaises(RuntimeError) as ctx:
                     md2pdf.ensure_font(fonts_dir=fonts_dir)
 
-            self.assertIn("download failed", str(ctx.exception))
-            self.assertFalse(dest.exists())
+            self.assertIn("integrity", str(ctx.exception).lower())
+            self.assertFalse((fonts_dir / "reg.ttf").exists())
+
+    def test_download_failure_raises_runtime_error(self):
+        import md2pdf
+        spec = md2pdf.FontResource(
+            filename="reg.ttf", url="https://x/r", sha256="0" * 64,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fonts_dir = Path(tmpdir)
+            with mock.patch.dict(
+                md2pdf.FONT_RESOURCES, {"regular": spec}, clear=True
+            ), mock.patch("urllib.request.urlopen", side_effect=OSError("net error")):
+                with self.assertRaises(RuntimeError) as ctx:
+                    md2pdf.ensure_font(fonts_dir=fonts_dir)
+
+            self.assertIn("download failed", str(ctx.exception).lower())
+            self.assertFalse((fonts_dir / "reg.ttf").exists())
 
 
 class TestConvertMdToPdf(unittest.TestCase):
@@ -183,7 +201,9 @@ class TestConvertMdToPdf(unittest.TestCase):
             Path(fake_font).write_bytes(b"fake font")
             out_pdf = os.path.join(tmpdir, "out.pdf")
 
-            with mock.patch("md2pdf.HTML") as mock_html:
+            with mock.patch("md2pdf.HTML") as mock_html, \
+                 mock.patch("md2pdf.CSS"), \
+                 mock.patch("md2pdf.FontConfiguration"):
                 mock_html.return_value.write_pdf.return_value = None
                 result = md2pdf.convert_md_to_pdf(md_file, out_pdf, font_path=fake_font)
 
@@ -206,10 +226,11 @@ class TestConvertMdToPdf(unittest.TestCase):
                     captured_css.append(kwargs["string"])
                 return mock.MagicMock()
 
-            with mock.patch("md2pdf.HTML") as mock_html:
-                with mock.patch("md2pdf.CSS", side_effect=capture_css):
-                    mock_html.return_value.write_pdf.return_value = None
-                    md2pdf.convert_md_to_pdf(md_file, out_pdf, font_path=fake_font)
+            with mock.patch("md2pdf.HTML") as mock_html, \
+                 mock.patch("md2pdf.FontConfiguration"), \
+                 mock.patch("md2pdf.CSS", side_effect=capture_css):
+                mock_html.return_value.write_pdf.return_value = None
+                md2pdf.convert_md_to_pdf(md_file, out_pdf, font_path=fake_font)
 
             self.assertTrue(any("@font-face" in c for c in captured_css))
 
@@ -222,7 +243,8 @@ class TestConvertMdToPdf(unittest.TestCase):
             Path(fake_font).write_bytes(b"fake")
             out_pdf = os.path.join(tmpdir, "out.pdf")
 
-            with mock.patch("md2pdf.HTML") as mock_html:
+            with mock.patch("md2pdf.HTML") as mock_html, \
+                 mock.patch("md2pdf.FontConfiguration"):
                 mock_html.return_value.write_pdf.side_effect = Exception("weasyprint error")
                 with self.assertRaises(RuntimeError) as ctx:
                     md2pdf.convert_md_to_pdf(md_file, out_pdf, font_path=fake_font)
@@ -255,9 +277,711 @@ class TestSha256Verify(unittest.TestCase):
             path.unlink()
 
 
+class TestGitHubStyleCSS(unittest.TestCase):
+    """CSS produced by _build_css() must match GitHub-flavored markdown look,
+    while preserving Korean readability settings."""
+
+    def _css(self):
+        import md2pdf
+        return md2pdf._build_css({
+            "regular": "file:///fake/regular.ttf",
+            "bold": "file:///fake/bold.ttf",
+            "code": "file:///fake/code.ttf",
+        })
+
+    def _block(self, css, selector):
+        """Return body of the first standalone CSS rule for `selector`,
+        or None if no such rule exists. Excludes grouped selectors like
+        'h1, h2 {' so we can assert per-element styling."""
+        m = re.search(
+            r"(?:^|\})\s*" + re.escape(selector) + r"\s*\{([^}]+)\}",
+            css,
+            re.MULTILINE,
+        )
+        return m.group(1) if m else None
+
+    def test_font_face_and_korean_font(self):
+        css = self._css()
+        self.assertIn("@font-face", css)
+        self.assertIn("NanumGothic", css)
+
+    def test_korean_readability_preserved(self):
+        css = self._css()
+        self.assertIn("word-break: keep-all", css)
+        self.assertRegex(css, r"line-height:\s*1\.[5-9]")
+
+    def test_h1_has_bottom_border(self):
+        body = self._block(self._css(), "h1")
+        self.assertIsNotNone(body, "h1 must have its own rule")
+        self.assertIn("border-bottom", body)
+
+    def test_h2_has_bottom_border(self):
+        body = self._block(self._css(), "h2")
+        self.assertIsNotNone(body, "h2 must have its own rule")
+        self.assertIn("border-bottom", body)
+
+    def test_blockquote_has_left_border(self):
+        body = self._block(self._css(), "blockquote")
+        self.assertIsNotNone(body)
+        self.assertIn("border-left", body)
+
+    def test_pre_block_has_background_and_padding(self):
+        body = self._block(self._css(), "pre")
+        self.assertIsNotNone(body, "pre must have its own rule (not grouped)")
+        self.assertIn("background", body)
+        self.assertIn("padding", body)
+
+    def test_pre_code_resets_background(self):
+        css = self._css()
+        self.assertIn("pre code", css)
+
+    def test_table_has_zebra_striping(self):
+        self.assertIn("nth-child", self._css())
+
+    def test_body_constrained_width(self):
+        css = self._css()
+        self.assertRegex(css, r"max-width:\s*\d")
+
+    def test_hr_styled(self):
+        body = self._block(self._css(), "hr")
+        self.assertIsNotNone(body)
+        self.assertIn("border", body)
+
+    def test_uses_passed_font_uris(self):
+        import md2pdf
+        css = md2pdf._build_css({
+            "regular": "file:///custom/regular.ttf",
+            "bold": "file:///custom/bold.ttf",
+            "code": "file:///custom/code.ttf",
+        })
+        self.assertIn("file:///custom/regular.ttf", css)
+        self.assertIn("file:///custom/bold.ttf", css)
+        self.assertIn("file:///custom/code.ttf", css)
+
+
+class TestPygmentsHighlighting(unittest.TestCase):
+    """Code blocks must receive Pygments-based syntax highlighting."""
+
+    def test_css_includes_pygments_token_styles(self):
+        import md2pdf
+        css = md2pdf._build_css({
+            "regular": "file:///x.ttf",
+            "bold": "file:///x.ttf",
+            "code": "file:///x.ttf",
+        })
+        self.assertIn(".codehilite", css)
+        # .k = Keyword token class, .s = String token class.
+        # These exist for every Pygments style.
+        self.assertRegex(css, r"\.codehilite\s+\.k\b")
+        self.assertRegex(css, r"\.codehilite\s+\.s\b")
+
+    def test_render_html_highlights_python_keyword(self):
+        import md2pdf
+        html = md2pdf._render_html("```python\ndef hello():\n    return 1\n```\n")
+        self.assertIn("codehilite", html)
+        self.assertRegex(html, r'<span class="k[a-z]*">def</span>')
+
+    def test_render_html_highlights_string_literal(self):
+        import md2pdf
+        html = md2pdf._render_html("```python\nx = 'hello'\n```\n")
+        # String tokens get a class starting with 's'
+        self.assertRegex(html, r'<span class="s[a-z0-9]*">')
+
+    def test_render_html_handles_no_language(self):
+        import md2pdf
+        html = md2pdf._render_html("```\nplain text\n```\n")
+        self.assertIn("plain text", html)
+
+    def test_render_html_handles_unknown_language(self):
+        import md2pdf
+        # Unknown lexer should fall back gracefully, not crash.
+        html = md2pdf._render_html("```nonexistentlang\nfoo bar\n```\n")
+        self.assertIn("foo", html)
+
+    def test_render_html_preserves_korean_in_code(self):
+        import md2pdf
+        html = md2pdf._render_html("```python\n# 한국어 주석\nx = '안녕'\n```\n")
+        self.assertIn("한국어", html)
+        self.assertIn("안녕", html)
+
+    def test_render_html_keeps_fence_attribute_stripping(self):
+        """Regression: _render_html must still apply the name=foo.yml fence
+        attribute fix introduced earlier."""
+        import md2pdf
+        md = "## 3.1 Section\n\n```yaml name=foo.yml\nk: v\n```\n\n## 3.2 Next\n"
+        html = md2pdf._render_html(md)
+        self.assertIn("3.2", html)
+
+    def test_render_html_renders_korean_heading(self):
+        """Regression: existing markdown features still work."""
+        import md2pdf
+        html = md2pdf._render_html("# 제목\n\n본문")
+        self.assertIn("<h1", html)
+        self.assertIn("제목", html)
+
+
+class TestCustomCSS(unittest.TestCase):
+    """`convert_md_to_pdf(custom_css=...)` adds a user stylesheet AFTER the
+    built-in one so the user can override base rules through CSS cascade."""
+
+    def _run_with_custom(self, custom_css_path):
+        """Run convert_md_to_pdf with WeasyPrint mocked, return the list of
+        CSS load specs in the order CSS() was instantiated. Each entry is
+        either ('string', body) or ('filename', path)."""
+        import md2pdf
+        seen = []
+
+        def capture_css(*args, **kwargs):
+            if "filename" in kwargs:
+                seen.append(("filename", kwargs["filename"]))
+            elif "string" in kwargs:
+                seen.append(("string", kwargs["string"]))
+            return mock.MagicMock()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            md_file = os.path.join(tmpdir, "x.md")
+            Path(md_file).write_text("# hi", encoding="utf-8")
+            font = os.path.join(tmpdir, "f.ttf")
+            Path(font).write_bytes(b"x")
+            out = os.path.join(tmpdir, "out.pdf")
+
+            with mock.patch("md2pdf.HTML") as mock_html, \
+                 mock.patch("md2pdf.CSS", side_effect=capture_css), \
+                 mock.patch("md2pdf.FontConfiguration"):
+                mock_html.return_value.write_pdf.return_value = None
+                md2pdf.convert_md_to_pdf(
+                    md_file, out, font_path=font, custom_css=custom_css_path
+                )
+            return seen
+
+    def test_custom_css_passed_as_filename_after_base(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            css_file = os.path.join(tmpdir, "custom.css")
+            Path(css_file).write_text("body { color: red; }", encoding="utf-8")
+            seen = self._run_with_custom(css_file)
+
+        # Base CSS as inline string, custom CSS as filename
+        kinds = [k for k, _ in seen]
+        self.assertIn("string", kinds)
+        self.assertIn("filename", kinds)
+
+        # Custom must be AFTER base for cascade override
+        base_idx = next(i for i, (k, _) in enumerate(seen) if k == "string")
+        custom_idx = next(
+            i for i, (k, v) in enumerate(seen) if k == "filename" and v == css_file
+        )
+        self.assertLess(
+            base_idx, custom_idx,
+            "Custom CSS must be loaded AFTER base for cascade override",
+        )
+
+    def test_no_custom_css_loads_only_base(self):
+        seen = self._run_with_custom(None)
+        kinds = [k for k, _ in seen]
+        self.assertIn("string", kinds)
+        self.assertNotIn("filename", kinds)
+
+    def test_missing_custom_css_raises_file_not_found(self):
+        import md2pdf
+        with tempfile.TemporaryDirectory() as tmpdir:
+            md_file = os.path.join(tmpdir, "x.md")
+            Path(md_file).write_text("# hi", encoding="utf-8")
+            font = os.path.join(tmpdir, "f.ttf")
+            Path(font).write_bytes(b"x")
+            out = os.path.join(tmpdir, "out.pdf")
+
+            with mock.patch("md2pdf.HTML") as mock_html, \
+                 mock.patch("md2pdf.CSS"), \
+                 mock.patch("md2pdf.FontConfiguration"):
+                mock_html.return_value.write_pdf.return_value = None
+                with self.assertRaises(FileNotFoundError) as ctx:
+                    md2pdf.convert_md_to_pdf(
+                        md_file, out, font_path=font,
+                        custom_css="/nonexistent/style.css",
+                    )
+            self.assertIn("CSS file not found", str(ctx.exception))
+
+
+class TestManualPageBreak(unittest.TestCase):
+    """`<div class="page"></div>` triggers a page break (VSCode markdown-pdf
+    compatible)."""
+
+    def _css(self):
+        import md2pdf
+        return md2pdf._build_css({
+            "regular": "file:///r.ttf",
+            "bold": "file:///b.ttf",
+            "code": "file:///c.ttf",
+        })
+
+    def test_page_class_has_break_after_rule(self):
+        css = self._css()
+        m = re.search(r"(?:^|\})\s*\.page\s*\{([^}]+)\}", css, re.MULTILINE)
+        self.assertIsNotNone(m, ".page selector must exist")
+        body = m.group(1)
+        self.assertIn("page-break-after", body)
+        self.assertIn("always", body)
+
+    def test_div_page_passes_through_markdown(self):
+        import md2pdf
+        html = md2pdf._render_html('A\n\n<div class="page"></div>\n\nB\n')
+        self.assertIn('class="page"', html)
+
+    def test_self_closing_div_page_normalised_to_closing_form(self):
+        """VSCode markdown-pdf uses `<div class="page"/>` (XHTML form). HTML5
+        ignores the trailing `/`, so without normalisation the div would
+        swallow the rest of the document and the page-break would never
+        fire. We must rewrite it to `<div class="page"></div>`."""
+        import md2pdf
+        html = md2pdf._render_html('A\n\n<div class="page"/>\n\nB\n')
+        self.assertIn('<div class="page"></div>', html)
+        self.assertNotIn('<div class="page"/>', html)
+
+
+class TestEmojiShortcodes(unittest.TestCase):
+    """`:rocket:` style shortcodes become emoji glyphs in body text — but
+    must remain literal inside `<code>` and `<pre>` blocks."""
+
+    def test_emoji_in_paragraph_replaced(self):
+        import md2pdf
+        html = md2pdf._render_html("Launch :rocket: now\n")
+        self.assertIn("🚀", html)
+        self.assertNotIn(":rocket:", html)
+
+    def test_multiple_emoji_replaced(self):
+        import md2pdf
+        html = md2pdf._render_html("Hello :smile: world :tada:\n")
+        self.assertIn("😄", html)
+        self.assertIn("🎉", html)
+
+    def test_emoji_inside_inline_code_preserved(self):
+        """Inline `code` containing :smile: must keep literal text."""
+        import md2pdf
+        html = md2pdf._render_html("Say `:smile:` in chat.\n")
+        # Literal text must remain so the reader sees the shortcode
+        self.assertIn(":smile:", html)
+
+    def test_emoji_inside_fenced_code_preserved(self):
+        import md2pdf
+        md = "```\nprint(':rocket:')\n```\n"
+        html = md2pdf._render_html(md)
+        self.assertIn(":rocket:", html)
+        self.assertNotIn("🚀", html)
+
+    def test_unknown_shortcode_stays_literal(self):
+        import md2pdf
+        html = md2pdf._render_html("This :totally_made_up_name: stays.\n")
+        self.assertIn(":totally_made_up_name:", html)
+
+    def test_korean_paragraph_with_emoji(self):
+        import md2pdf
+        html = md2pdf._render_html("축하합니다 :tada: 한국어 테스트\n")
+        self.assertIn("🎉", html)
+        self.assertIn("축하합니다", html)
+        self.assertIn("한국어 테스트", html)
+
+
+class TestFootnotes(unittest.TestCase):
+    """`[^1]` references and `[^1]: definition` blocks render with python-
+    markdown's built-in footnotes extension."""
+
+    def test_footnote_reference_creates_superscript(self):
+        import md2pdf
+        md = "본문[^1] 텍스트입니다.\n\n[^1]: 첫 번째 각주."
+        html = md2pdf._render_html(md)
+        # python-markdown emits <sup id="fnref:1"><a ...>1</a></sup>
+        self.assertIn("fnref", html)
+        self.assertIn("<sup", html)
+
+    def test_footnote_definition_appears_in_output(self):
+        import md2pdf
+        md = "Body[^1] text.\n\n[^1]: footnote body content"
+        html = md2pdf._render_html(md)
+        self.assertIn("footnote body content", html)
+        # Footnote section gets a class containing 'footnote'
+        self.assertIn("footnote", html.lower())
+
+    def test_korean_footnote(self):
+        import md2pdf
+        md = "한국어[^kr] 본문.\n\n[^kr]: 한국어 각주 설명입니다."
+        html = md2pdf._render_html(md)
+        self.assertIn("한국어 각주 설명입니다", html)
+        self.assertIn("fnref", html)
+
+    def test_no_footnote_in_plain_text(self):
+        """Regression: plain text without footnote markers stays clean."""
+        import md2pdf
+        html = md2pdf._render_html("그냥 본문입니다.")
+        self.assertNotIn("fnref", html)
+
+    def test_css_styles_footnote_section(self):
+        import md2pdf
+        css = md2pdf._build_css({
+            "regular": "file:///r.ttf",
+            "bold": "file:///b.ttf",
+            "code": "file:///c.ttf",
+        })
+        # `.footnote` selector exists with smaller font
+        m = re.search(r"\.footnote\s*\{([^}]+)\}", css)
+        self.assertIsNotNone(m, ".footnote selector must be styled")
+        self.assertIn("font-size", m.group(1))
+
+
+class TestTaskList(unittest.TestCase):
+    """GitHub-style task lists: `- [ ]` / `- [x]` render as disabled checkboxes."""
+
+    def test_unchecked_renders_disabled_checkbox(self):
+        import md2pdf
+        html = md2pdf._render_html("- [ ] todo\n")
+        self.assertIn('type="checkbox"', html)
+        self.assertIn('disabled', html)
+        self.assertNotIn('checked', html)
+        self.assertIn('todo', html)
+
+    def test_checked_renders_disabled_checked_checkbox(self):
+        import md2pdf
+        html = md2pdf._render_html("- [x] done\n")
+        self.assertIn('type="checkbox"', html)
+        self.assertIn('disabled', html)
+        self.assertIn('checked', html)
+        self.assertIn('done', html)
+
+    def test_uppercase_X_also_checked(self):
+        import md2pdf
+        html = md2pdf._render_html("- [X] done\n")
+        self.assertIn('checked', html)
+
+    def test_asterisk_marker_also_supported(self):
+        import md2pdf
+        html = md2pdf._render_html("* [ ] todo\n")
+        self.assertIn('type="checkbox"', html)
+
+    def test_indented_task_supported(self):
+        import md2pdf
+        html = md2pdf._render_html("  - [ ] indented\n")
+        self.assertIn('type="checkbox"', html)
+        self.assertIn('indented', html)
+
+    def test_korean_task_text_preserved(self):
+        import md2pdf
+        html = md2pdf._render_html("- [x] 한국어 작업 완료\n")
+        self.assertIn('한국어 작업 완료', html)
+        self.assertIn('checked', html)
+
+    def test_regular_list_unaffected(self):
+        import md2pdf
+        html = md2pdf._render_html("- normal item\n")
+        self.assertNotIn('type="checkbox"', html)
+
+    def test_bracket_text_in_paragraph_unaffected(self):
+        """`[foo]` syntax in regular text must not be misread as a task box."""
+        import md2pdf
+        html = md2pdf._render_html("Talk about [foo] and [bar].\n")
+        self.assertNotIn('type="checkbox"', html)
+
+
+class TestPageNumbers(unittest.TestCase):
+    """Page numbers rendered in the @page bottom-center margin box, with a
+    flag to disable."""
+
+    def _css(self, **kwargs):
+        import md2pdf
+        return md2pdf._build_css(
+            {
+                "regular": "file:///r.ttf",
+                "bold": "file:///b.ttf",
+                "code": "file:///c.ttf",
+            },
+            **kwargs,
+        )
+
+    def test_default_includes_page_counter(self):
+        css = self._css()
+        self.assertIn("@bottom-center", css)
+        self.assertIn("counter(page)", css)
+        self.assertIn("counter(pages)", css)
+
+    def test_disable_omits_page_counter(self):
+        css = self._css(page_numbers=False)
+        self.assertNotIn("@bottom-center", css)
+        self.assertNotIn("counter(page)", css)
+
+    def test_page_counter_appears_after_at_page(self):
+        css = self._css()
+        page_idx = css.find("@page")
+        bottom_idx = css.find("@bottom-center")
+        self.assertGreater(page_idx, -1)
+        self.assertGreater(bottom_idx, page_idx, "@bottom-center must follow @page {")
+
+
+class TestConvertPropagatesPageNumbers(unittest.TestCase):
+    """`convert_md_to_pdf(page_numbers=False)` must reach `_build_css`."""
+
+    def test_disabling_reaches_css(self):
+        import md2pdf
+        captured_css = []
+
+        def capture(*a, **kw):
+            if "string" in kw:
+                captured_css.append(kw["string"])
+            return mock.MagicMock()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            md_file = os.path.join(tmpdir, "x.md")
+            Path(md_file).write_text("# hi", encoding="utf-8")
+            font = os.path.join(tmpdir, "f.ttf")
+            Path(font).write_bytes(b"x")
+            out = os.path.join(tmpdir, "out.pdf")
+
+            with mock.patch("md2pdf.HTML") as mock_html, \
+                 mock.patch("md2pdf.CSS", side_effect=capture), \
+                 mock.patch("md2pdf.FontConfiguration"):
+                mock_html.return_value.write_pdf.return_value = None
+                md2pdf.convert_md_to_pdf(
+                    md_file, out, font_path=font, page_numbers=False
+                )
+
+            full = " ".join(captured_css)
+            self.assertNotIn("@bottom-center", full)
+
+
+class TestImagesAndBaseUrl(unittest.TestCase):
+    """Relative image paths in markdown must resolve against the .md file's
+    own directory, and `<img>` must be capped at the page width."""
+
+    def _css(self):
+        import md2pdf
+        return md2pdf._build_css({
+            "regular": "file:///r.ttf",
+            "bold": "file:///b.ttf",
+            "code": "file:///c.ttf",
+        })
+
+    def _block(self, css, selector):
+        m = re.search(
+            r"(?:^|\})\s*" + re.escape(selector) + r"\s*\{([^}]+)\}",
+            css, re.MULTILINE,
+        )
+        return m.group(1) if m else None
+
+    def test_img_rule_caps_at_page_width(self):
+        body = self._block(self._css(), "img")
+        self.assertIsNotNone(body, "img must have its own rule")
+        self.assertIn("max-width", body)
+        self.assertIn("100%", body)
+        self.assertIn("height", body)
+        self.assertIn("auto", body)
+
+    def test_html_called_with_md_directory_as_base_url(self):
+        """`HTML(string=..., base_url=...)` must use the .md file's directory
+        so that `![alt](images/foo.png)` resolves correctly regardless of cwd."""
+        import md2pdf
+        with tempfile.TemporaryDirectory() as tmpdir:
+            md_file = os.path.join(tmpdir, "doc.md")
+            Path(md_file).write_text(
+                "![logo](images/logo.png)\n\n# 제목\n", encoding="utf-8"
+            )
+            fake_font = os.path.join(tmpdir, "f.ttf")
+            Path(fake_font).write_bytes(b"x")
+            out = os.path.join(tmpdir, "out.pdf")
+
+            with mock.patch("md2pdf.HTML") as mock_html, \
+                 mock.patch("md2pdf.CSS"), \
+                 mock.patch("md2pdf.FontConfiguration"):
+                mock_html.return_value.write_pdf.return_value = None
+                md2pdf.convert_md_to_pdf(md_file, out, font_path=fake_font)
+
+            mock_html.assert_called_once()
+            kwargs = mock_html.call_args.kwargs
+            self.assertIn(
+                "base_url", kwargs,
+                "convert_md_to_pdf must pass base_url so relative image "
+                "paths resolve against the .md file's directory",
+            )
+            self.assertEqual(
+                kwargs["base_url"],
+                os.path.dirname(os.path.abspath(md_file)),
+            )
+
+
+class TestFontMultiWeight(unittest.TestCase):
+    """`_build_css` must register Regular + Bold NanumGothic and a code
+    monospace font (D2Coding) so headings/strong render with real bold and
+    code blocks use a Korean-aware fixed-width face."""
+
+    def _css(self):
+        import md2pdf
+        return md2pdf._build_css({
+            "regular": "file:///fake/regular.ttf",
+            "bold": "file:///fake/bold.ttf",
+            "code": "file:///fake/code.ttf",
+        })
+
+    def test_at_least_three_font_face_rules(self):
+        self.assertGreaterEqual(self._css().count("@font-face"), 3)
+
+    def test_nanumgothic_normal_weight_uses_regular_uri(self):
+        block = re.search(
+            r"@font-face\s*\{[^}]*?'NanumGothic'[^}]*?font-weight:\s*normal[^}]*?\}",
+            self._css(), re.DOTALL,
+        )
+        self.assertIsNotNone(block, "Need a normal-weight NanumGothic @font-face")
+        self.assertIn("file:///fake/regular.ttf", block.group(0))
+
+    def test_nanumgothic_bold_weight_uses_bold_uri(self):
+        block = re.search(
+            r"@font-face\s*\{[^}]*?'NanumGothic'[^}]*?font-weight:\s*bold[^}]*?\}",
+            self._css(), re.DOTALL,
+        )
+        self.assertIsNotNone(block, "Need a bold-weight NanumGothic @font-face")
+        self.assertIn("file:///fake/bold.ttf", block.group(0))
+
+    def test_d2coding_face_uses_code_uri(self):
+        block = re.search(
+            r"@font-face\s*\{[^}]*?'D2Coding'[^}]*?\}",
+            self._css(), re.DOTALL,
+        )
+        self.assertIsNotNone(block, "Need a D2Coding @font-face")
+        self.assertIn("file:///fake/code.ttf", block.group(0))
+
+    def test_code_rule_prefers_d2coding(self):
+        m = re.search(r"(?:^|\})\s*code\s*\{([^}]+)\}", self._css(), re.MULTILINE)
+        self.assertIsNotNone(m)
+        self.assertIn("D2Coding", m.group(1))
+
+
+class TestEnsureFonts(unittest.TestCase):
+    """ensure_fonts() must handle direct .ttf and zip-archived sources, with
+    SHA256 verification before any disk write."""
+
+    def test_resources_have_three_known_roles(self):
+        import md2pdf
+        self.assertEqual(set(md2pdf.FONT_RESOURCES.keys()), {"regular", "bold", "code"})
+
+    def test_returns_existing_files_without_download(self):
+        import md2pdf
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fonts_dir = Path(tmpdir)
+            for spec in md2pdf.FONT_RESOURCES.values():
+                (fonts_dir / spec.filename).write_bytes(b"cached")
+
+            with mock.patch("urllib.request.urlopen") as mock_open:
+                paths = md2pdf.ensure_fonts(fonts_dir=fonts_dir)
+
+            mock_open.assert_not_called()
+            self.assertEqual(set(paths.keys()), {"regular", "bold", "code"})
+
+    def test_downloads_plain_and_extracts_zip_member(self):
+        """Regular/bold come as plain .ttf; code is shipped inside a zip."""
+        import md2pdf
+
+        # Build a fake zip whose internal layout matches the real D2Coding zip
+        member_name = md2pdf.FONT_RESOURCES["code"].archive_member
+        self.assertTrue(member_name, "Code resource must declare an archive_member")
+        zip_buf = io.BytesIO()
+        with zipfile.ZipFile(zip_buf, "w") as zf:
+            zf.writestr(member_name, b"d2coding bytes")
+            zf.writestr("README.txt", b"ignored")
+        zip_data = zip_buf.getvalue()
+
+        reg_data = b"regular bytes"
+        bold_data = b"bold bytes"
+
+        fake_resources = {
+            "regular": md2pdf.FontResource(
+                filename="reg.ttf", url="https://x/reg",
+                sha256=hashlib.sha256(reg_data).hexdigest(),
+            ),
+            "bold": md2pdf.FontResource(
+                filename="bold.ttf", url="https://x/bold",
+                sha256=hashlib.sha256(bold_data).hexdigest(),
+            ),
+            "code": md2pdf.FontResource(
+                filename="code.ttf", url="https://x/code.zip",
+                sha256=hashlib.sha256(zip_data).hexdigest(),
+                archive_member=member_name,
+            ),
+        }
+        url_to_data = {
+            "https://x/reg": reg_data,
+            "https://x/bold": bold_data,
+            "https://x/code.zip": zip_data,
+        }
+
+        class FakeResp:
+            def __init__(self, data):
+                self._data = data
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+            def read(self): return self._data
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fonts_dir = Path(tmpdir)
+            with mock.patch.dict(md2pdf.FONT_RESOURCES, fake_resources, clear=True), \
+                 mock.patch(
+                     "urllib.request.urlopen",
+                     side_effect=lambda url: FakeResp(url_to_data[url]),
+                 ):
+                paths = md2pdf.ensure_fonts(fonts_dir=fonts_dir)
+
+            self.assertEqual((fonts_dir / "reg.ttf").read_bytes(), reg_data)
+            self.assertEqual((fonts_dir / "bold.ttf").read_bytes(), bold_data)
+            self.assertEqual((fonts_dir / "code.ttf").read_bytes(), b"d2coding bytes")
+
+    def test_sha256_mismatch_raises_and_does_not_write(self):
+        import md2pdf
+
+        class FakeResp:
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+            def read(self): return b"actual data"
+
+        fake_resources = {
+            "regular": md2pdf.FontResource(
+                filename="reg.ttf", url="https://x/reg",
+                sha256="0" * 64,
+            ),
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fonts_dir = Path(tmpdir)
+            with mock.patch.dict(md2pdf.FONT_RESOURCES, fake_resources, clear=True), \
+                 mock.patch("urllib.request.urlopen", return_value=FakeResp()):
+                with self.assertRaises(RuntimeError) as ctx:
+                    md2pdf.ensure_fonts(fonts_dir=fonts_dir)
+
+            self.assertIn("integrity", str(ctx.exception).lower())
+            self.assertFalse((fonts_dir / "reg.ttf").exists())
+
+    def test_download_failure_raises_runtime_error(self):
+        import md2pdf
+        fake_resources = {
+            "regular": md2pdf.FontResource(
+                filename="reg.ttf", url="https://x/reg",
+                sha256="0" * 64,
+            ),
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fonts_dir = Path(tmpdir)
+            with mock.patch.dict(md2pdf.FONT_RESOURCES, fake_resources, clear=True), \
+                 mock.patch("urllib.request.urlopen", side_effect=OSError("net down")):
+                with self.assertRaises(RuntimeError) as ctx:
+                    md2pdf.ensure_fonts(fonts_dir=fonts_dir)
+
+            self.assertIn("download failed", str(ctx.exception).lower())
+
+
+def _weasyprint_available() -> bool:
+    import md2pdf
+    return md2pdf.HTML is not None
+
+
 @unittest.skipUnless(
     (Path(__file__).parent / "fonts" / "NanumGothic-Regular.ttf").exists(),
     "NanumGothic-Regular.ttf not downloaded — run the script once to trigger download",
+)
+@unittest.skipUnless(
+    _weasyprint_available(),
+    "WeasyPrint native libraries (pango/harfbuzz/cairo) not loadable in this env",
 )
 class TestIntegration(unittest.TestCase):
     """Integration tests requiring the actual font file."""
@@ -321,6 +1045,46 @@ class TestArgParser(unittest.TestCase):
             md2pdf.main(["--webui", "-p", "1234"])
         mock_run.assert_called_once_with(port=1234)
 
+    def test_default_page_numbers_on(self):
+        import md2pdf
+        args = md2pdf._build_arg_parser().parse_args(["doc.md"])
+        self.assertTrue(args.page_numbers)
+
+    def test_no_page_numbers_flag(self):
+        import md2pdf
+        args = md2pdf._build_arg_parser().parse_args(["doc.md", "--no-page-numbers"])
+        self.assertFalse(args.page_numbers)
+
+    def test_main_passes_no_page_numbers_to_convert(self):
+        import md2pdf
+        with mock.patch("md2pdf.convert_md_to_pdf") as mock_conv:
+            mock_conv.return_value = Path("/tmp/x.pdf")
+            md2pdf.main(["doc.md", "out.pdf", "--no-page-numbers"])
+        # Inspect the kwargs that main() passed through
+        _, kwargs = mock_conv.call_args
+        self.assertIn("page_numbers", kwargs)
+        self.assertFalse(kwargs["page_numbers"])
+
+    def test_css_flag_parsed(self):
+        import md2pdf
+        args = md2pdf._build_arg_parser().parse_args(
+            ["doc.md", "--css", "custom.css"]
+        )
+        self.assertEqual(args.css, "custom.css")
+
+    def test_default_css_is_none(self):
+        import md2pdf
+        args = md2pdf._build_arg_parser().parse_args(["doc.md"])
+        self.assertIsNone(args.css)
+
+    def test_main_passes_css_to_convert(self):
+        import md2pdf
+        with mock.patch("md2pdf.convert_md_to_pdf") as mock_conv:
+            mock_conv.return_value = Path("/tmp/x.pdf")
+            md2pdf.main(["doc.md", "out.pdf", "--css", "my.css"])
+        _, kwargs = mock_conv.call_args
+        self.assertEqual(kwargs.get("custom_css"), "my.css")
+
 
 class TestWebUI(unittest.TestCase):
     """Test the Flask web UI routes with mocked conversion."""
@@ -351,8 +1115,101 @@ class TestWebUI(unittest.TestCase):
         self.assertIn("drop-zone", body)
         self.assertIn("dragover", body)
 
+    def test_index_has_page_numbers_checkbox(self):
+        resp = self.client.get("/")
+        body = resp.get_data(as_text=True)
+        self.assertIn('name="page_numbers"', body)
+        # Checked by default — page numbers ON unless user opts out
+        self.assertRegex(body, r'name="page_numbers"[^>]*\schecked')
+
+    def test_convert_disables_page_numbers_when_unchecked(self):
+        captured = {}
+
+        def fake_convert(md_path, pdf_path, font_path=None, **kwargs):
+            captured.update(kwargs)
+            Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
+            return Path(pdf_path)
+
+        # Browser submits checked checkboxes only; absence == unchecked
+        with mock.patch("md2pdf.convert_md_to_pdf", side_effect=fake_convert):
+            data = {"file": (io.BytesIO(b"# hi"), "doc.md")}
+            resp = self.client.post(
+                "/convert", data=data, content_type="multipart/form-data"
+            )
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("page_numbers", captured)
+        self.assertFalse(captured["page_numbers"])
+
+    def test_index_has_custom_css_input(self):
+        resp = self.client.get("/")
+        body = resp.get_data(as_text=True)
+        self.assertIn('name="custom_css"', body)
+        # Hint that .css files are accepted
+        self.assertIn(".css", body)
+
+    def test_convert_with_custom_css_passes_path(self):
+        captured = {}
+
+        def fake_convert(md_path, pdf_path, font_path=None, **kwargs):
+            captured.update(kwargs)
+            captured["md_path"] = md_path
+            Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
+            return Path(pdf_path)
+
+        with mock.patch("md2pdf.convert_md_to_pdf", side_effect=fake_convert):
+            data = {
+                "file": (io.BytesIO(b"# hi"), "doc.md"),
+                "custom_css": (io.BytesIO(b"body { color: red; }"), "style.css"),
+            }
+            resp = self.client.post(
+                "/convert", data=data, content_type="multipart/form-data"
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("custom_css", captured)
+        self.assertIsNotNone(captured["custom_css"])
+        # The path should exist when convert_md_to_pdf is called
+        # (it'll be cleaned up after but the side_effect ran during the call)
+        self.assertTrue(captured["custom_css"].endswith(".css"))
+
+    def test_convert_without_custom_css_passes_none(self):
+        captured = {}
+
+        def fake_convert(md_path, pdf_path, font_path=None, **kwargs):
+            captured.update(kwargs)
+            Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
+            return Path(pdf_path)
+
+        with mock.patch("md2pdf.convert_md_to_pdf", side_effect=fake_convert):
+            data = {"file": (io.BytesIO(b"# hi"), "doc.md")}
+            resp = self.client.post(
+                "/convert", data=data, content_type="multipart/form-data"
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsNone(captured.get("custom_css"))
+
+    def test_convert_enables_page_numbers_when_checked(self):
+        captured = {}
+
+        def fake_convert(md_path, pdf_path, font_path=None, **kwargs):
+            captured.update(kwargs)
+            Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
+            return Path(pdf_path)
+
+        with mock.patch("md2pdf.convert_md_to_pdf", side_effect=fake_convert):
+            data = {
+                "file": (io.BytesIO(b"# hi"), "doc.md"),
+                "page_numbers": "on",
+            }
+            resp = self.client.post(
+                "/convert", data=data, content_type="multipart/form-data"
+            )
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(captured.get("page_numbers"))
+
     def test_convert_success(self):
-        def fake_convert(md_path, pdf_path, font_path=None):
+        def fake_convert(md_path, pdf_path, font_path=None, **kwargs):
             Path(pdf_path).write_bytes(b"%PDF-1.4 fake pdf bytes")
             return Path(pdf_path)
 

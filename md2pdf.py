@@ -8,13 +8,57 @@ import sys
 import tempfile
 import threading
 import urllib.request
+import zipfile
+from dataclasses import dataclass, field
 from pathlib import Path
-from weasyprint import HTML, CSS
-from weasyprint.text.fonts import FontConfiguration
 
-FONT_URL = "https://github.com/google/fonts/raw/main/ofl/nanumgothic/NanumGothic-Regular.ttf"
-FONT_SHA256 = "76f45ef4a6bcff344c837c95a7dcc26e017e38b5846d5ae0cdcb5b86be2e2d31"
-FONT_FILENAME = "NanumGothic-Regular.ttf"
+try:
+    from weasyprint import HTML, CSS
+    from weasyprint.text.fonts import FontConfiguration
+except (ImportError, OSError):
+    # WeasyPrint pulls in native libs (pango/harfbuzz/cairo) at import time;
+    # let the module still load so unit tests targeting pure-Python helpers
+    # (markdown preprocessing, CSS builder, argparse, Flask routes with
+    # convert mocked) can run on machines lacking those libraries. Anything
+    # that actually renders PDF will hit a clear ImportError below.
+    HTML = None
+    CSS = None
+    FontConfiguration = None
+
+@dataclass(frozen=True)
+class FontResource:
+    """A bundled font we may need to download. If `archive_member` is set,
+    `url` points to a zip archive and the named entry inside is extracted
+    to `filename`; otherwise `url` points directly to a .ttf file."""
+    filename: str
+    url: str
+    sha256: str
+    archive_member: str = ""
+
+
+FONT_RESOURCES: dict[str, FontResource] = {
+    "regular": FontResource(
+        filename="NanumGothic-Regular.ttf",
+        url="https://github.com/google/fonts/raw/main/ofl/nanumgothic/NanumGothic-Regular.ttf",
+        sha256="76f45ef4a6bcff344c837c95a7dcc26e017e38b5846d5ae0cdcb5b86be2e2d31",
+    ),
+    "bold": FontResource(
+        filename="NanumGothic-Bold.ttf",
+        url="https://github.com/google/fonts/raw/main/ofl/nanumgothic/NanumGothic-Bold.ttf",
+        sha256="f96298f9fb18e364d2370f4c3ce948ac67a2b61af992d7234bc15c42b033c674",
+    ),
+    "code": FontResource(
+        filename="D2Coding.ttf",
+        url="https://github.com/naver/d2codingfont/releases/download/VER1.3.2/D2Coding-Ver1.3.2-20180524.zip",
+        sha256="0f1c9192eac7d56329dddc620f9f1666b707e9c8ed38fe1f988d0ae3e30b24e6",
+        archive_member="D2Coding/D2Coding-Ver1.3.2-20180524.ttf",
+    ),
+}
+
+# Backwards-compat module-level constants.
+FONT_FILENAME = FONT_RESOURCES["regular"].filename
+FONT_URL = FONT_RESOURCES["regular"].url
+FONT_SHA256 = FONT_RESOURCES["regular"].sha256
 
 
 def _verify_sha256(filepath: Path, expected: str) -> bool:
@@ -22,167 +66,456 @@ def _verify_sha256(filepath: Path, expected: str) -> bool:
     return h == expected
 
 
-def ensure_font(fonts_dir: Path = None) -> Path:
-    """
-    Return path to NanumGothic-Regular.ttf, downloading it if necessary.
-    fonts_dir defaults to <script_dir>/fonts/.
-    """
-    if fonts_dir is None:
-        fonts_dir = Path(__file__).parent / "fonts"
-    fonts_dir.mkdir(parents=True, exist_ok=True)
-
-    dest = fonts_dir / FONT_FILENAME
+def _ensure_font_resource(spec: FontResource, fonts_dir: Path) -> Path:
+    """Download (if missing), verify SHA256, and (if needed) extract `spec`
+    into `fonts_dir`. Atomic w.r.t. disk: bytes are verified in memory before
+    any file is written, so failures never leave a partial file behind."""
+    dest = fonts_dir / spec.filename
     if dest.exists():
         return dest
 
-    print(f"Downloading font: {FONT_FILENAME} ...")
+    print(f"Downloading font: {spec.filename} ...")
     try:
-        urllib.request.urlretrieve(FONT_URL, dest)
+        with urllib.request.urlopen(spec.url) as resp:
+            data = resp.read()
     except Exception as e:
-        if dest.exists():
-            dest.unlink()
-        raise RuntimeError(f"Font download failed: {e}") from e
+        raise RuntimeError(f"Font download failed for {spec.filename}: {e}") from e
 
-    if not _verify_sha256(dest, FONT_SHA256):
-        dest.unlink()
+    actual = hashlib.sha256(data).hexdigest()
+    if actual != spec.sha256:
         raise RuntimeError(
-            "Font integrity check failed (SHA256 mismatch). "
-            "Delete fonts/ and retry, or set FONT_SHA256 to the new value."
+            f"Font integrity check failed for {spec.filename} (SHA256 mismatch). "
+            f"expected={spec.sha256}, got={actual}. "
+            "Delete fonts/ and retry, or update FONT_RESOURCES."
         )
+
+    if not spec.archive_member:
+        dest.write_bytes(data)
+    else:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            with zf.open(spec.archive_member) as src:
+                dest.write_bytes(src.read())
 
     print(f"Font saved to: {dest}")
     return dest
 
 
-def convert_md_to_pdf(md_filepath, pdf_filepath, font_path=None):
+def ensure_fonts(fonts_dir: Path = None) -> dict[str, Path]:
+    """Download and verify every bundled font. Returns role → on-disk path.
+    Roles: 'regular', 'bold', 'code' (D2Coding monospace)."""
+    if fonts_dir is None:
+        fonts_dir = Path(__file__).parent / "fonts"
+    fonts_dir.mkdir(parents=True, exist_ok=True)
+    return {
+        role: _ensure_font_resource(spec, fonts_dir)
+        for role, spec in FONT_RESOURCES.items()
+    }
+
+
+def ensure_font(fonts_dir: Path = None) -> Path:
+    """Backwards-compatible: returns the path to NanumGothic-Regular only."""
+    if fonts_dir is None:
+        fonts_dir = Path(__file__).parent / "fonts"
+    fonts_dir.mkdir(parents=True, exist_ok=True)
+    return _ensure_font_resource(FONT_RESOURCES["regular"], fonts_dir)
+
+
+MARKDOWN_EXTENSIONS = ["extra", "toc", "codehilite"]
+MARKDOWN_EXTENSION_CONFIGS = {
+    "codehilite": {
+        # Avoid mis-classifying plain fences (```\n...\n```) as some random
+        # language; only highlight when the user names a real lexer.
+        "guess_lang": False,
+        "css_class": "codehilite",
+        # CSS class names instead of inline style="..." so PDFs stay diff-able.
+        "noclasses": False,
+        "pygments_style": "default",
+    },
+}
+
+_PYGMENTS_STYLE = "default"
+
+
+def _preprocess_markdown(md_text: str) -> str:
+    """Text-level transformations applied before passing to python-markdown.
+
+    1. Strip unsupported `name=foo.yml` style attributes from fenced code
+       info strings (python-markdown's fenced_code only recognises a single
+       language token).
+    2. Convert GitHub-flavored task list markers `- [ ]` / `- [x]` into
+       inline disabled checkboxes — python-markdown has no native support.
+    3. Normalise XHTML self-closing `<div class="page"/>` to HTML5 closing
+       form so the page-break CSS actually fires (HTML5 ignores the trailing
+       `/` and would otherwise wrap the rest of the document in the div).
     """
-    Convert a Markdown file to PDF with Korean font support.
+    md_text = re.sub(
+        r'<div\s+class=["\']page["\']\s*/>',
+        '<div class="page"></div>',
+        md_text,
+    )
+    md_text = re.sub(
+        r"^([ \t]*(?:```|~~~)\w+)[ \t]+\S.*$", r"\1", md_text, flags=re.MULTILINE
+    )
+    md_text = re.sub(
+        r"^([ \t]*[-*+])[ \t]+\[ \][ \t]+",
+        r'\1 <input type="checkbox" disabled> ',
+        md_text, flags=re.MULTILINE,
+    )
+    md_text = re.sub(
+        r"^([ \t]*[-*+])[ \t]+\[[xX]\][ \t]+",
+        r'\1 <input type="checkbox" disabled checked> ',
+        md_text, flags=re.MULTILINE,
+    )
+    return md_text
 
-    Args:
-        md_filepath: Path to input .md file.
-        pdf_filepath: Path for output .pdf file.
-        font_path: Optional explicit path to a .ttf font file.
-                   If None, NanumGothic-Regular.ttf is auto-downloaded.
 
-    Returns:
-        Path to the generated PDF.
+_EMOJI_SAFE_SPLIT = re.compile(
+    r"(<pre\b[^>]*>.*?</pre>|<code\b[^>]*>.*?</code>)", re.DOTALL
+)
 
-    Raises:
-        FileNotFoundError: If md_filepath or explicit font_path does not exist.
-        RuntimeError: If PDF conversion fails.
+
+def _emojize_html(html: str) -> str:
+    """Replace `:shortcode:` with emoji glyphs in HTML body text, leaving
+    `<pre>` and `<code>` blocks untouched (so source listings keep their
+    literal `:foo:` text). Unknown shortcodes pass through unchanged."""
+    import emoji
+    parts = _EMOJI_SAFE_SPLIT.split(html)
+    return "".join(
+        part if part.startswith(("<pre", "<code"))
+        else emoji.emojize(part, language="alias")
+        for part in parts
+    )
+
+
+def _render_html(md_text: str) -> str:
+    """Markdown → HTML using the same preprocessing and extensions used by
+    `convert_md_to_pdf`. Exposed so tests don't duplicate the extension list.
     """
-    if not os.path.exists(md_filepath):
-        raise FileNotFoundError(f"Markdown file not found: {md_filepath}")
+    md_text = _preprocess_markdown(md_text)
+    html = markdown.markdown(
+        md_text,
+        extensions=MARKDOWN_EXTENSIONS,
+        extension_configs=MARKDOWN_EXTENSION_CONFIGS,
+    )
+    return _emojize_html(html)
 
-    if font_path is None:
-        font_path = ensure_font()
-    else:
-        font_path = Path(font_path)
-        if not font_path.exists():
-            raise FileNotFoundError(f"Font file not found: {font_path}")
 
-    font_uri = Path(os.path.abspath(font_path)).as_uri()
+def _pygments_css() -> str:
+    """Return Pygments token-color rules scoped to `.codehilite`.
 
-    with open(md_filepath, "r", encoding="utf-8") as f:
-        md_text = f.read()
+    `HtmlFormatter.get_style_defs()` also emits a few unscoped rules
+    (`pre { line-height: 125% }`, `td.linenos { ... }`, `span.linenos { ... }`)
+    which would either fight our `pre` styling or apply to features we don't
+    use (line numbers). Strip them so the cascade stays predictable.
+    """
+    from pygments.formatters import HtmlFormatter
+    raw = HtmlFormatter(style=_PYGMENTS_STYLE, nobackground=True).get_style_defs(
+        ".codehilite"
+    )
+    cleaned = []
+    for line in raw.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith(("pre ", "pre{", "td.linenos", "span.linenos")):
+            continue
+        cleaned.append(line)
+    return "\n".join(cleaned)
 
-    # Strip unsupported attributes (e.g. `name=foo.yml`) from fenced code
-    # fence info strings.  Python-Markdown's fenced_code extension only
-    # recognises a single language token; extra key=value pairs cause the
-    # fence NOT to be treated as a code block, which then misparses the
-    # surrounding headings and text.
-    md_text = re.sub(r"^([ \t]*(?:```|~~~)\w+)[ \t]+\S.*$", r"\1", md_text, flags=re.MULTILINE)
 
-    html_content = markdown.markdown(md_text, extensions=["extra", "toc"])
+def _build_css(font_uris: dict, *, page_numbers: bool = True) -> str:
+    """Build the stylesheet used for PDF rendering.
 
-    css_string = f"""
+    `font_uris` must contain keys 'regular', 'bold', 'code' — each a `file://`
+    URI pointing to a .ttf. Three @font-face rules are emitted: NanumGothic
+    Regular, NanumGothic Bold (real glyph weight, not synthetic), and
+    D2Coding (Korean-aware fixed-width font for code blocks).
+
+    `page_numbers=True` injects an `@bottom-center` margin box rendering
+    `<page> / <total>` on every page; pass False to omit.
+
+    GitHub-flavored markdown look (h1/h2 underline, blockquote bar, zebra
+    tables, distinct inline-code vs pre-block) with Korean readability
+    settings preserved (`word-break: keep-all`, generous line-height).
+    Pygments token rules are placed first so our own `pre`/`code` rules
+    win on the cascade for shared properties.
+    """
+    page_number_rule = ""
+    if page_numbers:
+        page_number_rule = """
+        @bottom-center {
+            content: counter(page) " / " counter(pages);
+            font-family: 'NanumGothic', sans-serif;
+            font-size: 9pt;
+            color: #59636e;
+        }
+        """
+    return f"""
+    {_pygments_css()}
+
     @font-face {{
         font-family: 'NanumGothic';
-        src: url('{font_uri}') format('truetype');
+        src: url('{font_uris["regular"]}') format('truetype');
+        font-weight: normal;
+        font-style: normal;
+    }}
+    @font-face {{
+        font-family: 'NanumGothic';
+        src: url('{font_uris["bold"]}') format('truetype');
+        font-weight: bold;
+        font-style: normal;
+    }}
+    @font-face {{
+        font-family: 'D2Coding';
+        src: url('{font_uris["code"]}') format('truetype');
         font-weight: normal;
         font-style: normal;
     }}
 
     * {{
         font-family: 'NanumGothic', sans-serif;
+        box-sizing: border-box;
     }}
 
     body {{
-        line-height: 1.8;
-        padding: 40px;
-        color: #333;
+        line-height: 1.7;
+        padding: 24px 32px;
+        margin: 0 auto;
+        max-width: 980px;
+        color: #1f2328;
         word-break: keep-all;
         overflow-wrap: break-word;
+        font-size: 11pt;
     }}
 
     h1, h2, h3, h4, h5, h6 {{
         margin-top: 1.5em;
-        margin-bottom: 0.5em;
-        color: #111;
+        margin-bottom: 0.6em;
+        font-weight: 600;
+        line-height: 1.3;
+        color: #1f2328;
     }}
 
-    pre, code {{
-        background-color: #f4f4f4;
-        padding: 5px 8px;
-        border-radius: 4px;
-        font-family: monospace;
-        font-size: 0.9em;
+    h1 {{
+        font-size: 2em;
+        padding-bottom: 0.3em;
+        border-bottom: 1px solid #d1d9e0;
+    }}
+
+    h2 {{
+        font-size: 1.5em;
+        padding-bottom: 0.3em;
+        border-bottom: 1px solid #d1d9e0;
+    }}
+
+    h3 {{ font-size: 1.25em; }}
+    h4 {{ font-size: 1em; }}
+    h5 {{ font-size: 0.9em; }}
+    h6 {{ font-size: 0.85em; color: #59636e; }}
+
+    p {{
+        margin-top: 0;
+        margin-bottom: 1em;
+    }}
+
+    a {{
+        color: #0969da;
+        text-decoration: none;
+    }}
+
+    code {{
+        font-family: 'D2Coding', 'NanumGothic', Consolas, Menlo, monospace;
+        font-size: 85%;
+        padding: 0.2em 0.4em;
+        background-color: rgba(175, 184, 193, 0.2);
+        border-radius: 6px;
+    }}
+
+    pre {{
+        background-color: #f6f8fa;
+        padding: 16px;
+        border-radius: 6px;
+        line-height: 1.45;
+        font-size: 85%;
+        margin-bottom: 16px;
+        overflow: auto;
     }}
 
     pre code {{
         padding: 0;
         background: none;
+        border-radius: 0;
+        font-size: 100%;
     }}
 
     blockquote {{
-        border-left: 4px solid #ccc;
-        margin: 0;
-        padding-left: 16px;
-        color: #666;
+        margin: 0 0 16px 0;
+        padding: 0 1em;
+        color: #59636e;
+        border-left: 4px solid #d1d9e0;
     }}
 
     table {{
         border-collapse: collapse;
+        margin-bottom: 16px;
         width: 100%;
-        margin-bottom: 20px;
     }}
 
     th, td {{
-        border: 1px solid #ddd;
-        padding: 8px 12px;
+        border: 1px solid #d1d9e0;
+        padding: 6px 13px;
         text-align: left;
     }}
 
     th {{
-        background-color: #f2f2f2;
-        font-weight: bold;
+        background-color: #f6f8fa;
+        font-weight: 600;
     }}
 
-    a {{
-        color: #0066cc;
+    tr:nth-child(2n) {{
+        background-color: #f6f8fa;
     }}
 
     hr {{
-        border: none;
-        border-top: 1px solid #ddd;
+        border: 0;
+        border-top: 2px solid #d1d9e0;
         margin: 24px 0;
+    }}
+
+    img {{
+        max-width: 100%;
+        height: auto;
+    }}
+
+    ul, ol {{
+        margin-top: 0;
+        margin-bottom: 16px;
+        padding-left: 2em;
+    }}
+
+    li + li {{
+        margin-top: 0.25em;
+    }}
+
+    li input[type="checkbox"] {{
+        margin-right: 0.5em;
+        vertical-align: middle;
+    }}
+
+    sup {{
+        font-size: 0.75em;
+        vertical-align: super;
+        line-height: 0;
+    }}
+
+    .footnote {{
+        margin-top: 32px;
+        padding-top: 12px;
+        font-size: 0.85em;
+        color: #59636e;
+    }}
+
+    .footnote hr {{
+        border-top: 1px solid #d1d9e0;
+        margin: 0 0 12px 0;
+    }}
+
+    .footnote ol {{
+        padding-left: 1.4em;
+    }}
+
+    a.footnote-ref, a.footnote-backref {{
+        color: #0969da;
+        text-decoration: none;
+    }}
+
+    .page {{
+        page-break-after: always;
     }}
 
     @page {{
         margin: 2cm;
+        {page_number_rule}
     }}
     """
+
+
+def convert_md_to_pdf(md_filepath, pdf_filepath, font_path=None, *, page_numbers: bool = True, custom_css=None):
+    """
+    Convert a Markdown file to PDF with Korean font support.
+
+    Args:
+        md_filepath: Path to input .md file.
+        pdf_filepath: Path for output .pdf file.
+        font_path: Optional .ttf path used for *all* font roles (regular,
+                   bold, code). If None, the bundled NanumGothic Regular,
+                   NanumGothic Bold, and D2Coding fonts are auto-downloaded.
+        page_numbers: If True (default), render `<n> / <total>` in the
+                   page footer. Pass False to omit.
+        custom_css: Optional path to an additional .css file. Loaded AFTER
+                   the built-in stylesheet so its rules win on the cascade
+                   for matching specificities — partial overrides without
+                   forking the whole base style.
+
+    Returns:
+        Path to the generated PDF.
+
+    Raises:
+        FileNotFoundError: If md_filepath, font_path, or custom_css path
+                           does not exist.
+        RuntimeError: If PDF conversion fails.
+    """
+    if not os.path.exists(md_filepath):
+        raise FileNotFoundError(f"Markdown file not found: {md_filepath}")
+
+    if custom_css is not None and not os.path.exists(custom_css):
+        raise FileNotFoundError(f"CSS file not found: {custom_css}")
+
+    if font_path is None:
+        font_paths = ensure_fonts()
+    else:
+        font_path = Path(font_path)
+        if not font_path.exists():
+            raise FileNotFoundError(f"Font file not found: {font_path}")
+        # Single-font override mode: the same file plays all three roles.
+        font_paths = {"regular": font_path, "bold": font_path, "code": font_path}
+
+    font_uris = {
+        role: Path(os.path.abspath(p)).as_uri() for role, p in font_paths.items()
+    }
+
+    with open(md_filepath, "r", encoding="utf-8") as f:
+        md_text = f.read()
+
+    html_content = _render_html(md_text)
+
+    css_string = _build_css(font_uris, page_numbers=page_numbers)
 
     final_html = (
         "<html><head><meta charset='utf-8'></head>"
         f"<body>{html_content}</body></html>"
     )
 
+    if HTML is None or FontConfiguration is None:
+        raise RuntimeError(
+            "WeasyPrint failed to import (missing native libraries: "
+            "pango/harfbuzz/cairo). Install them and retry."
+        )
+
+    # Use the .md file's directory as base_url so that relative image
+    # references (e.g. `![](images/x.png)`) resolve against the document,
+    # not the user's current working directory.
+    base_url = os.path.dirname(os.path.abspath(md_filepath))
+
     font_config = FontConfiguration()
+    stylesheets = [CSS(string=css_string, font_config=font_config)]
+    if custom_css is not None:
+        # Loaded AFTER the base; cascade order = source order for equal
+        # specificities, so user rules win on overlap.
+        stylesheets.append(CSS(filename=str(custom_css), font_config=font_config))
+
     try:
-        HTML(string=final_html).write_pdf(
+        HTML(string=final_html, base_url=base_url).write_pdf(
             pdf_filepath,
-            stylesheets=[CSS(string=css_string, font_config=font_config)],
+            stylesheets=stylesheets,
             font_config=font_config,
         )
     except Exception as e:
@@ -350,6 +683,39 @@ FORM_TEMPLATE = """<!doctype html>
   }
   .file-name.show { display: block; }
 
+  .option {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 14px;
+    font-size: 14px;
+    color: var(--text);
+    cursor: pointer;
+    user-select: none;
+  }
+  .option input[type=checkbox] {
+    width: 18px; height: 18px;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+  .option.css-input {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+  }
+  .option.css-input .label {
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .option.css-input input[type=file] {
+    font-size: 13px;
+    padding: 6px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg);
+    color: var(--text);
+  }
+
   button.submit {
     width: 100%;
     margin-top: 16px;
@@ -406,6 +772,14 @@ FORM_TEMPLATE = """<!doctype html>
                  accept=".md,.markdown,text/markdown" required>
         </label>
         <div class="file-name" id="file-name"></div>
+        <label class="option">
+          <input type="checkbox" name="page_numbers" checked>
+          <span>페이지 번호 표시 (예: 3 / 39)</span>
+        </label>
+        <label class="option css-input">
+          <span class="label">커스텀 CSS (선택, .css)</span>
+          <input type="file" name="custom_css" accept=".css,text/css">
+        </label>
         <button class="submit" type="submit">PDF로 변환</button>
       </form>
       <footer>콘솔에서 <code>exit</code> 입력 시 서버가 종료됩니다.</footer>
@@ -482,12 +856,31 @@ def create_app():
             print(f"[webui] {msg}", file=sys.stderr)
             return render_template_string(FORM_TEMPLATE, error=msg), 400
 
+        # Browser submits checked checkboxes only; absence == unchecked
+        page_numbers = request.form.get("page_numbers") == "on"
+
+        # Optional user-supplied stylesheet; the FileStorage is empty if
+        # no file was selected.
+        css_upload = request.files.get("custom_css")
+
         with tempfile.TemporaryDirectory() as tmpdir:
             md_path = Path(tmpdir) / name
             pdf_path = md_path.with_suffix(".pdf")
             f.save(md_path)
+
+            custom_css_path = None
+            if css_upload is not None and css_upload.filename:
+                css_save = Path(tmpdir) / "user.css"
+                css_upload.save(css_save)
+                custom_css_path = str(css_save)
+
             try:
-                convert_md_to_pdf(str(md_path), str(pdf_path))
+                convert_md_to_pdf(
+                    str(md_path),
+                    str(pdf_path),
+                    page_numbers=page_numbers,
+                    custom_css=custom_css_path,
+                )
             except FileNotFoundError as e:
                 msg = f"파일을 찾을 수 없습니다: {e}"
                 print(f"[webui] {msg}", file=sys.stderr)
@@ -538,6 +931,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--webui", action="store_true", help="Start the web UI server")
     parser.add_argument("-p", "--port", type=int, default=5000, help="Web UI port (default: 5000)")
     parser.add_argument("--font", help="Optional explicit .ttf font path")
+    parser.add_argument(
+        "--no-page-numbers",
+        action="store_false",
+        dest="page_numbers",
+        help="Disable page numbers in the footer (default: on)",
+    )
+    parser.set_defaults(page_numbers=True)
+    parser.add_argument(
+        "--css",
+        help="Path to a custom CSS file. Loaded after the built-in stylesheet "
+             "so its rules override matching base rules.",
+    )
     return parser
 
 
@@ -555,7 +960,13 @@ def main(argv=None) -> int:
 
     output_file = args.output or args.input.replace(".md", ".pdf")
     try:
-        result = convert_md_to_pdf(args.input, output_file, font_path=args.font)
+        result = convert_md_to_pdf(
+            args.input,
+            output_file,
+            font_path=args.font,
+            page_numbers=args.page_numbers,
+            custom_css=args.css,
+        )
         print(f"PDF saved: {result}")
         return 0
     except FileNotFoundError as e:
