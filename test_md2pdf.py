@@ -451,6 +451,54 @@ class TestPygmentsHighlighting(unittest.TestCase):
         self.assertIn("제목", html)
 
 
+class TestMonospaceFontInheritance(unittest.TestCase):
+    """Code blocks render as `<pre><code><span class="...">...</span>...</code></pre>`.
+    Pygments wraps every token in a `<span>`. If the universal `*` rule sets
+    `font-family: NanumGothic`, that rule applies *directly* to every span
+    (specificity 0,0,0 — wins over inheritance), so spans inside `<code>` end
+    up in the sans-serif body font instead of the D2Coding monospace face.
+    Defense: keep font-family off `*`, set it on `body` instead, and let
+    `code`/`pre` overrides cascade to descendants."""
+
+    def _css(self):
+        import md2pdf
+        return md2pdf._build_css({
+            "regular": "file:///r.ttf",
+            "bold": "file:///b.ttf",
+            "code": "file:///c.ttf",
+        })
+
+    def _block(self, css, selector):
+        m = re.search(
+            r"(?:^|\})\s*" + re.escape(selector) + r"\s*\{([^}]+)\}",
+            css, re.MULTILINE,
+        )
+        return m.group(1) if m else None
+
+    def test_universal_selector_does_not_set_font_family(self):
+        body = self._block(self._css(), r"\*")
+        if body is not None:
+            self.assertNotIn(
+                "font-family", body,
+                "`*` must not set font-family — it would override inheritance "
+                "for every descendant of <code>/<pre>, defeating monospace.",
+            )
+
+    def test_body_sets_default_font_family(self):
+        body = self._block(self._css(), "body")
+        self.assertIsNotNone(body)
+        self.assertIn("font-family", body)
+        self.assertIn("NanumGothic", body)
+
+    def test_pre_block_uses_monospace_font(self):
+        """The `<pre>` wrapper itself must declare the monospace face so it
+        propagates to all descendant spans via inheritance."""
+        body = self._block(self._css(), "pre")
+        self.assertIsNotNone(body)
+        self.assertIn("D2Coding", body)
+        self.assertIn("monospace", body)
+
+
 class TestCustomCSS(unittest.TestCase):
     """`convert_md_to_pdf(custom_css=...)` adds a user stylesheet AFTER the
     built-in one so the user can override base rules through CSS cascade."""

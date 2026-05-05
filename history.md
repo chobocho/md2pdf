@@ -1,5 +1,28 @@
 # Change History
 
+## 2026-05-05 — 코드 블록 고정폭 폰트 적용 (Pygments 토큰 span 문제)
+
+### 증상
+``` ``` 코드 블록의 토큰들이 D2Coding이 아닌 본문 sans-serif(NanumGothic)로 출력 — 가독성 저하 및 정렬 깨짐.
+
+### 원인
+codehilite 출력 구조: `<pre><code><span class="k">def</span>...</code></pre>`
+- `code { font-family: 'D2Coding', ... }` 규칙은 `<code>`에만 직접 적용
+- 하지만 `* { font-family: 'NanumGothic' }` 규칙이 specificity (0,0,0)로 모든 `<span>`에 **직접** 적용 → 부모 `<code>`로부터의 상속을 차단
+- 결과: 토큰 span들이 NanumGothic으로 렌더
+
+### 수정
+1. `*` 규칙에서 `font-family` 제거 (`box-sizing`만 유지)
+2. `body`로 `font-family: 'NanumGothic', sans-serif;` 이동 → 자연스러운 상속 cascade 복원
+3. `pre`에 `font-family: 'D2Coding', ...` 추가 → `<pre>` 자체와 모든 자손 span이 monospace 상속
+
+### TDD
+1. `TestMonospaceFontInheritance` 신규 3건 (RED 확인)
+   - `test_universal_selector_does_not_set_font_family`
+   - `test_body_sets_default_font_family`
+   - `test_pre_block_uses_monospace_font`
+2. CSS 수정 후 GREEN, 전체 116건 회귀 없음 (사전 실패 1건 무관)
+
 ## 2026-05-05 — 태스크 리스트 체크박스 줄바꿈 버그 수정
 
 ### 증상

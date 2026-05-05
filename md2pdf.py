@@ -273,12 +273,16 @@ def _build_css(font_uris: dict, *, page_numbers: bool = True) -> str:
         font-style: normal;
     }}
 
+    /* font-family lives on body (not `*`) so that `code`/`pre` overrides
+       cascade to descendant spans via inheritance. A `* {{ font-family }}`
+       rule wins directly on every span (specificity 0,0,0 vs inherited
+       value), forcing Pygments tokens back into the body sans-serif font. */
     * {{
-        font-family: 'NanumGothic', sans-serif;
         box-sizing: border-box;
     }}
 
     body {{
+        font-family: 'NanumGothic', sans-serif;
         line-height: 1.7;
         padding: 24px 32px;
         margin: 0 auto;
@@ -333,6 +337,7 @@ def _build_css(font_uris: dict, *, page_numbers: bool = True) -> str:
     }}
 
     pre {{
+        font-family: 'D2Coding', 'NanumGothic', Consolas, Menlo, monospace;
         background-color: #f6f8fa;
         padding: 16px;
         border-radius: 6px;
