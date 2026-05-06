@@ -1,5 +1,27 @@
 # Change History
 
+## 2026-05-06 — 빈 첫 페이지 버그 수정 (선두 `\newpage` 무시)
+
+### 증상
+이전 커밋(`6ec410d`)으로 `\newpage`가 페이지 분리로 동작하면서, Pandoc 스타일 원고에서 1페이지가 빈 페이지가 되는 부작용 발생. 본문은 2페이지부터 시작.
+
+### 원인
+Pandoc 사용자는 보통 YAML 메타데이터 직후에 `\newpage`를 적어 둔다 — Pandoc이 메타데이터로 만들어주는 *제목 페이지*를 본문과 분리하려는 의도. 본 프로젝트는 제목 페이지를 따로 렌더하지 않으므로, YAML 제거 후 남은 선두 `\newpage`가 빈 페이지를 만든 채 본문을 다음 페이지로 밀어내고 있었음.
+
+### 수정
+`_preprocess_markdown`에 한 단계 추가: YAML 제거 직후, 본문 콘텐츠가 등장하기 전까지의 빈 줄과 단독 `\newpage`/`\pagebreak` 줄을 모두 소비.
+
+```
+\A(?:[ \t]*\r?\n|[ \t]*\\(?:newpage|pagebreak)[ \t]*\r?\n)+
+```
+
+본문 중간에 등장하는 `\newpage`는 그대로 페이지 분리 div로 변환된다(회귀 테스트로 보호).
+
+### TDD
+1. `TestLeadingPageBreakStripped` 4건 추가, 3건 RED.
+2. 전처리기 수정 후 GREEN, 전체 130건 회귀 없음.
+3. `scheme-book-full.md` 실측: HTML이 `<h1 id="_1">머리말</h1>`로 즉시 시작; `class="page"` 53→52건(선두 1개만 제거).
+
 ## 2026-05-06 — Pandoc 호환성: YAML 프론트매터·`\newpage` 처리
 
 ### 증상

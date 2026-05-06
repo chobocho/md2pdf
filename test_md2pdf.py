@@ -1512,5 +1512,44 @@ class TestLatexPageBreakCommands(unittest.TestCase):
         self.assertEqual(html.count('class="page"'), 2)
 
 
+class TestLeadingPageBreakStripped(unittest.TestCase):
+    """A `\\newpage` *before any content* would render a blank first page —
+    the page-break fires with nothing on the page above it. Pandoc authors
+    commonly write `\\newpage` immediately after the YAML metadata block
+    expecting Pandoc to fill the first page with a title page rendered from
+    the metadata; we don't, so the leading page-break must be stripped."""
+
+    def test_leading_newpage_after_frontmatter_dropped(self):
+        import md2pdf
+        md = '---\ntitle: T\n---\n\n\\newpage\n\n# 머리말\n\nBody.\n'
+        html = md2pdf._render_html(md)
+        # No page break before the first heading
+        self.assertNotRegex(html, r'class="page"[^<]*</div>\s*<h1')
+        self.assertIn("머리말", html)
+
+    def test_leading_newpage_at_document_start_dropped(self):
+        """Even without frontmatter, a `\\newpage` at the very top makes
+        page 1 blank."""
+        import md2pdf
+        md = '\\newpage\n\n# Title\n\nBody.\n'
+        html = md2pdf._render_html(md)
+        self.assertNotIn('class="page"', html)
+        self.assertIn("Title", html)
+
+    def test_multiple_leading_newpages_all_dropped(self):
+        import md2pdf
+        md = '---\ntitle: T\n---\n\n\\newpage\n\n\\pagebreak\n\n# Title\n'
+        html = md2pdf._render_html(md)
+        self.assertNotIn('class="page"', html)
+
+    def test_newpage_after_real_content_preserved(self):
+        """Regression: only the leading run is dropped — page breaks between
+        chapters must still fire."""
+        import md2pdf
+        md = '# Chapter 1\n\nBody.\n\n\\newpage\n\n# Chapter 2\n'
+        html = md2pdf._render_html(md)
+        self.assertIn('class="page"', html)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
