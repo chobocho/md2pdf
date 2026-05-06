@@ -139,18 +139,38 @@ _PYGMENTS_STYLE = "default"
 def _preprocess_markdown(md_text: str) -> str:
     """Text-level transformations applied before passing to python-markdown.
 
-    1. Strip unsupported `name=foo.yml` style attributes from fenced code
+    1. Strip a Pandoc-style YAML metadata block at the very top of the file
+       (`---\\n...\\n---\\n` or `---\\n...\\n...\\n`). Without this the
+       leading `---` is parsed as a horizontal rule and the metadata leaks
+       into the body as a paragraph.
+    2. Convert Pandoc/LaTeX hard page-break commands (`\\newpage`,
+       `\\pagebreak`) on a line of their own into `<div class="page"></div>`
+       so the existing `.page { page-break-after: always }` CSS fires.
+    3. Strip unsupported `name=foo.yml` style attributes from fenced code
        info strings (python-markdown's fenced_code only recognises a single
        language token).
-    2. Convert GitHub-flavored task list markers `- [ ]` / `- [x]` into
+    4. Convert GitHub-flavored task list markers `- [ ]` / `- [x]` into
        a styled `<span class="taskbox">` (checked variants get an extra
        class). We avoid `<input type="checkbox">` because WeasyPrint renders
        the form control with a wide default size that pushes the label
        text onto the next line.
-    3. Normalise XHTML self-closing `<div class="page"/>` to HTML5 closing
+    5. Normalise XHTML self-closing `<div class="page"/>` to HTML5 closing
        form so the page-break CSS actually fires (HTML5 ignores the trailing
        `/` and would otherwise wrap the rest of the document in the div).
     """
+    md_text = re.sub(
+        r"\A---\r?\n.*?\r?\n(?:---|\.\.\.)\r?\n",
+        "",
+        md_text,
+        count=1,
+        flags=re.DOTALL,
+    )
+    md_text = re.sub(
+        r"^[ \t]*\\(?:newpage|pagebreak)[ \t]*$",
+        '<div class="page"></div>',
+        md_text,
+        flags=re.MULTILINE,
+    )
     md_text = re.sub(
         r'<div\s+class=["\']page["\']\s*/>',
         '<div class="page"></div>',

@@ -1416,5 +1416,101 @@ class TestWebUI(unittest.TestCase):
         self.assertIn("boom", body)
 
 
+class TestYamlFrontmatterStripping(unittest.TestCase):
+    """Pandoc-style YAML metadata blocks (`---\\n...\\n---\\n` at the very
+    top of the file) must be stripped before python-markdown sees the text;
+    otherwise the leading `---` is parsed as a horizontal rule and the
+    metadata leaks into the body as a paragraph."""
+
+    def test_yaml_frontmatter_at_top_is_removed(self):
+        import md2pdf
+        md = (
+            '---\n'
+            'title: "Test"\n'
+            'author: A\n'
+            'documentclass: book\n'
+            '---\n\n'
+            '# 머리말\n\n'
+            '본문 내용.\n'
+        )
+        html = md2pdf._render_html(md)
+        self.assertNotIn("title:", html)
+        self.assertNotIn("documentclass", html)
+        self.assertNotIn("author:", html)
+        self.assertIn("머리말", html)
+        self.assertIn("본문 내용", html)
+
+    def test_yaml_frontmatter_with_dotdotdot_terminator(self):
+        """Pandoc allows the closing fence to be `...` instead of `---`."""
+        import md2pdf
+        md = '---\ntitle: T\n...\n\n# Body\n'
+        html = md2pdf._render_html(md)
+        self.assertNotIn("title:", html)
+        self.assertIn("Body", html)
+
+    def test_no_frontmatter_passthrough(self):
+        import md2pdf
+        html = md2pdf._render_html("# Hello\n\nBody.\n")
+        self.assertIn("Hello", html)
+        self.assertIn("Body", html)
+
+    def test_horizontal_rule_in_body_preserved(self):
+        """Three dashes mid-document is a horizontal rule, NOT frontmatter."""
+        import md2pdf
+        md = "# Hello\n\nBefore.\n\n---\n\nAfter.\n"
+        html = md2pdf._render_html(md)
+        self.assertIn("<hr", html)
+        self.assertIn("Before", html)
+        self.assertIn("After", html)
+
+    def test_first_heading_after_frontmatter_renders(self):
+        """Regression: ensure the heading right after stripped frontmatter
+        is parsed as a heading (i.e. the strip consumes the trailing newline)."""
+        import md2pdf
+        md = '---\ntitle: T\n---\n\n# Heading\n'
+        html = md2pdf._render_html(md)
+        self.assertRegex(html, r"<h1[^>]*>Heading</h1>")
+
+
+class TestLatexPageBreakCommands(unittest.TestCase):
+    """Pandoc/LaTeX hard page-break commands (`\\newpage`, `\\pagebreak`) on
+    a line of their own become `<div class="page"></div>` so the existing
+    `.page { page-break-after: always }` CSS triggers a real page break."""
+
+    def test_newpage_becomes_page_div(self):
+        import md2pdf
+        md = "A\n\n\\newpage\n\nB\n"
+        html = md2pdf._render_html(md)
+        self.assertIn('class="page"', html)
+        self.assertNotIn(r'\newpage', html)
+
+    def test_pagebreak_becomes_page_div(self):
+        import md2pdf
+        md = "A\n\n\\pagebreak\n\nB\n"
+        html = md2pdf._render_html(md)
+        self.assertIn('class="page"', html)
+        self.assertNotIn(r'\pagebreak', html)
+
+    def test_indented_newpage_still_converted(self):
+        import md2pdf
+        md = "A\n\n   \\newpage   \n\nB\n"
+        html = md2pdf._render_html(md)
+        self.assertIn('class="page"', html)
+        self.assertNotIn(r'\newpage', html)
+
+    def test_newpage_within_text_left_alone(self):
+        """`\\newpage` embedded mid-sentence is not a hard break — leave it."""
+        import md2pdf
+        md = "이 코드는 \\newpage 명령을 사용한다.\n"
+        html = md2pdf._render_html(md)
+        self.assertNotIn('class="page"', html)
+
+    def test_multiple_newpages_each_convert(self):
+        import md2pdf
+        md = "A\n\n\\newpage\n\nB\n\n\\newpage\n\nC\n"
+        html = md2pdf._render_html(md)
+        self.assertEqual(html.count('class="page"'), 2)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

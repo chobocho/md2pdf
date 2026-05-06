@@ -1,5 +1,28 @@
 # Change History
 
+## 2026-05-06 — Pandoc 호환성: YAML 프론트매터·`\newpage` 처리
+
+### 증상
+`scheme-book-full.md`(Pandoc 스타일 원고)를 변환했을 때:
+1. YAML 메타데이터 블록(`---\ntitle: …\n---`)이 PDF 첫 페이지에 본문 단락으로 그대로 노출.
+   - 첫 `---`이 `<hr>`로, 둘째 `---`이 setext h2로 파싱되고 그 사이가 일반 단락이 되어버림.
+2. 본문 곳곳에 등장하는 `\newpage`(53회) 강제 페이지 분리 지시어가 그대로 텍스트로 인쇄되고 페이지가 넘어가지 않음.
+
+### 원인
+`_preprocess_markdown`이 Pandoc 메타데이터 블록과 LaTeX 페이지 분리 명령을 인식하지 못함. python-markdown 자체에는 두 문법 모두 없음(전자는 `meta` 익스텐션이 있지만 그래도 본문에 누출되지는 않을 뿐 별도 데이터 구조로 보관됨; 본 프로젝트에선 단순히 잘라내는 편이 명확함).
+
+### 수정
+`_preprocess_markdown`에 두 정규식 추가:
+1. `\A---\r?\n.*?\r?\n(?:---|\.\.\.)\r?\n` (DOTALL) — 파일 맨 앞의 메타데이터 블록을 통째로 제거. Pandoc 스펙대로 종결자는 `---` 또는 `...` 둘 다 허용.
+2. `^[ \t]*\\(?:newpage|pagebreak)[ \t]*$` (MULTILINE) — 단독 줄로 등장한 `\newpage` / `\pagebreak`를 기존에 이미 존재하던 `<div class="page"></div>` 마크업으로 치환. 따라서 `.page { page-break-after: always }` CSS가 그대로 동작 → 별도 CSS 변경 불필요.
+
+문장 안에 박혀 있는 `\newpage`(예: "이 코드는 `\newpage` 명령을 사용한다")는 변환 대상이 아니다 — 줄 전체가 명령 하나뿐일 때만 페이지 분리로 본다.
+
+### TDD
+1. `TestYamlFrontmatterStripping` 5건, `TestLatexPageBreakCommands` 5건 신규 추가, 6건 RED 확인.
+2. 전처리기 수정 후 GREEN, 전체 126건 회귀 없음.
+3. `scheme-book-full.md` 실측: HTML 본문에서 `documentclass`/`newpage`/`pagebreak` 0건, `class="page"` 53건(원본의 `\newpage` 53회와 일치).
+
 ## 2026-05-05 — 코드 블록 고정폭 폰트 적용 (Pygments 토큰 span 문제)
 
 ### 증상
