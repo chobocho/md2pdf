@@ -234,6 +234,40 @@ class TestConvertMdToPdf(unittest.TestCase):
 
             self.assertTrue(any("@font-face" in c for c in captured_css))
 
+    def test_explicit_font_path_also_fills_hanja_role(self):
+        """When the user passes `font_path=`, the same .ttf must play *all*
+        four roles (regular, bold, code, hanja) — otherwise _build_css would
+        KeyError on the missing 'hanja' URI. Users who supply an override
+        accept that font's coverage as authoritative."""
+        import md2pdf
+        with tempfile.TemporaryDirectory() as tmpdir:
+            md_file = os.path.join(tmpdir, "test.md")
+            Path(md_file).write_text("# 漢字\n", encoding="utf-8")
+            fake_font = os.path.join(tmpdir, "font.ttf")
+            Path(fake_font).write_bytes(b"fake")
+            out_pdf = os.path.join(tmpdir, "out.pdf")
+
+            captured_css = []
+
+            def capture_css(*args, **kwargs):
+                if "string" in kwargs:
+                    captured_css.append(kwargs["string"])
+                return mock.MagicMock()
+
+            with mock.patch("md2pdf.HTML") as mock_html, \
+                 mock.patch("md2pdf.FontConfiguration"), \
+                 mock.patch("md2pdf.CSS", side_effect=capture_css):
+                mock_html.return_value.write_pdf.return_value = None
+                md2pdf.convert_md_to_pdf(md_file, out_pdf, font_path=fake_font)
+
+            css_blob = "\n".join(captured_css)
+            # All four @font-face rules must point at the override URI.
+            self.assertGreaterEqual(css_blob.count("@font-face"), 4)
+            self.assertGreaterEqual(
+                css_blob.count(Path(fake_font).as_uri()), 4,
+                "All four font roles must resolve to the override path",
+            )
+
     def test_write_pdf_failure_raises_runtime_error(self):
         import md2pdf
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -287,6 +321,7 @@ class TestGitHubStyleCSS(unittest.TestCase):
             "regular": "file:///fake/regular.ttf",
             "bold": "file:///fake/bold.ttf",
             "code": "file:///fake/code.ttf",
+            "hanja": "file:///fake/hanja.otf",
         })
 
     def _block(self, css, selector):
@@ -384,10 +419,12 @@ class TestGitHubStyleCSS(unittest.TestCase):
             "regular": "file:///custom/regular.ttf",
             "bold": "file:///custom/bold.ttf",
             "code": "file:///custom/code.ttf",
+            "hanja": "file:///custom/hanja.otf",
         })
         self.assertIn("file:///custom/regular.ttf", css)
         self.assertIn("file:///custom/bold.ttf", css)
         self.assertIn("file:///custom/code.ttf", css)
+        self.assertIn("file:///custom/hanja.otf", css)
 
 
 class TestPygmentsHighlighting(unittest.TestCase):
@@ -399,6 +436,7 @@ class TestPygmentsHighlighting(unittest.TestCase):
             "regular": "file:///x.ttf",
             "bold": "file:///x.ttf",
             "code": "file:///x.ttf",
+            "hanja": "file:///x.otf",
         })
         self.assertIn(".codehilite", css)
         # .k = Keyword token class, .s = String token class.
@@ -466,6 +504,7 @@ class TestMonospaceFontInheritance(unittest.TestCase):
             "regular": "file:///r.ttf",
             "bold": "file:///b.ttf",
             "code": "file:///c.ttf",
+            "hanja": "file:///h.otf",
         })
 
     def _block(self, css, selector):
@@ -591,6 +630,7 @@ class TestManualPageBreak(unittest.TestCase):
             "regular": "file:///r.ttf",
             "bold": "file:///b.ttf",
             "code": "file:///c.ttf",
+            "hanja": "file:///h.otf",
         })
 
     def test_page_class_has_break_after_rule(self):
@@ -699,6 +739,7 @@ class TestFootnotes(unittest.TestCase):
             "regular": "file:///r.ttf",
             "bold": "file:///b.ttf",
             "code": "file:///c.ttf",
+            "hanja": "file:///h.otf",
         })
         # `.footnote` selector exists with smaller font
         m = re.search(r"\.footnote\s*\{([^}]+)\}", css)
@@ -792,6 +833,7 @@ class TestTaskListCSS(unittest.TestCase):
             "regular": "file:///r.ttf",
             "bold": "file:///b.ttf",
             "code": "file:///c.ttf",
+            "hanja": "file:///h.otf",
         })
 
     def test_taskbox_rule_exists(self):
@@ -824,6 +866,7 @@ class TestPageNumbers(unittest.TestCase):
                 "regular": "file:///r.ttf",
                 "bold": "file:///b.ttf",
                 "code": "file:///c.ttf",
+                "hanja": "file:///h.otf",
             },
             **kwargs,
         )
@@ -888,6 +931,7 @@ class TestImagesAndBaseUrl(unittest.TestCase):
             "regular": "file:///r.ttf",
             "bold": "file:///b.ttf",
             "code": "file:///c.ttf",
+            "hanja": "file:///h.otf",
         })
 
     def _block(self, css, selector):
@@ -948,10 +992,12 @@ class TestFontMultiWeight(unittest.TestCase):
             "regular": "file:///fake/regular.ttf",
             "bold": "file:///fake/bold.ttf",
             "code": "file:///fake/code.ttf",
+            "hanja": "file:///fake/hanja.otf",
         })
 
-    def test_at_least_three_font_face_rules(self):
-        self.assertGreaterEqual(self._css().count("@font-face"), 3)
+    def test_at_least_four_font_face_rules(self):
+        # Regular + Bold NanumGothic + D2Coding + Noto Sans KR (Hanja fallback).
+        self.assertGreaterEqual(self._css().count("@font-face"), 4)
 
     def test_nanumgothic_normal_weight_uses_regular_uri(self):
         block = re.search(
@@ -982,14 +1028,66 @@ class TestFontMultiWeight(unittest.TestCase):
         self.assertIsNotNone(m)
         self.assertIn("D2Coding", m.group(1))
 
+    def test_noto_sans_kr_face_uses_hanja_uri(self):
+        """Hanja fallback face: covers CJK Unified Ideographs that NanumGothic
+        lacks (NanumGothic-Regular has 0 of ~21k CJK code points). Without
+        this @font-face, every Hanja character renders as the missing-glyph
+        box (.notdef). The face's family name is wired into both body and
+        code font-family chains so per-glyph fallback kicks in."""
+        block = re.search(
+            r"@font-face\s*\{[^}]*?'Noto Sans KR'[^}]*?\}",
+            self._css(), re.DOTALL,
+        )
+        self.assertIsNotNone(block, "Need a 'Noto Sans KR' @font-face for Hanja")
+        self.assertIn("file:///fake/hanja.otf", block.group(0))
+
+    def test_body_font_family_falls_back_to_noto_sans_kr(self):
+        """The body's font-family chain must list 'Noto Sans KR' AFTER
+        NanumGothic. WeasyPrint's HarfBuzz layer falls back per-glyph: Hangul
+        and Latin still come from NanumGothic, but Hanja resolves to the
+        Noto face."""
+        m = re.search(
+            r"(?:^|\})\s*body\s*\{([^}]+)\}", self._css(), re.MULTILINE
+        )
+        self.assertIsNotNone(m, "body must have its own rule")
+        body = m.group(1)
+        nanum_pos = body.find("NanumGothic")
+        noto_pos = body.find("Noto Sans KR")
+        self.assertGreaterEqual(nanum_pos, 0, "body must list NanumGothic")
+        self.assertGreater(
+            noto_pos, nanum_pos,
+            "Noto Sans KR must come AFTER NanumGothic so Hangul still uses "
+            "NanumGothic and only Hanja falls through to Noto",
+        )
+
+    def test_code_font_family_falls_back_to_noto_sans_kr(self):
+        """Same per-glyph fallback applies inside `<code>`/`<pre>` — Hanja
+        appearing in code samples must not render as boxes either."""
+        m = re.search(r"(?:^|\})\s*code\s*\{([^}]+)\}", self._css(), re.MULTILINE)
+        self.assertIsNotNone(m)
+        self.assertIn("Noto Sans KR", m.group(1))
+
 
 class TestEnsureFonts(unittest.TestCase):
     """ensure_fonts() must handle direct .ttf and zip-archived sources, with
     SHA256 verification before any disk write."""
 
-    def test_resources_have_three_known_roles(self):
+    def test_resources_have_four_known_roles(self):
         import md2pdf
-        self.assertEqual(set(md2pdf.FONT_RESOURCES.keys()), {"regular", "bold", "code"})
+        self.assertEqual(
+            set(md2pdf.FONT_RESOURCES.keys()),
+            {"regular", "bold", "code", "hanja"},
+        )
+
+    def test_hanja_resource_points_to_otf_with_sha256(self):
+        """The Hanja role wraps a real downloadable OTF (not a placeholder).
+        Guard against accidentally landing a stub URL or zero hash."""
+        import md2pdf
+        spec = md2pdf.FONT_RESOURCES["hanja"]
+        self.assertTrue(spec.filename.endswith(".otf") or spec.filename.endswith(".ttf"))
+        self.assertTrue(spec.url.startswith("http"))
+        self.assertRegex(spec.sha256, r"^[0-9a-f]{64}$")
+        self.assertNotEqual(spec.sha256, "0" * 64)
 
     def test_returns_existing_files_without_download(self):
         import md2pdf
@@ -1002,7 +1100,9 @@ class TestEnsureFonts(unittest.TestCase):
                 paths = md2pdf.ensure_fonts(fonts_dir=fonts_dir)
 
             mock_open.assert_not_called()
-            self.assertEqual(set(paths.keys()), {"regular", "bold", "code"})
+            self.assertEqual(
+                set(paths.keys()), {"regular", "bold", "code", "hanja"}
+            )
 
     def test_downloads_plain_and_extracts_zip_member(self):
         """Regular/bold come as plain .ttf; code is shipped inside a zip."""

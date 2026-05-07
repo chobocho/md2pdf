@@ -7,6 +7,7 @@
 - **GitHub 스타일 시각**: h1/h2 하단 테두리, blockquote 좌측 막대, 표 zebra 줄무늬, 인라인/블록 코드 구분
 - **코드 하이라이팅**: Pygments로 키워드/문자열/주석 색상 구분 (펜스 언어 인식). 긴 라인은 자동 줄바꿈되어 페이지 폭에 맞게 흐름
 - **한국어 폰트 다중 weight**: NanumGothic Regular + **Bold** + 코드용 D2Coding (모두 자동 다운로드)
+- **생활한자 지원**: NanumGothic이 가지지 않은 CJK 한자(漢字)는 Noto Sans KR(한국 SubsetOTF, 약 8.1k자)로 글리프 단위 자동 fallback — `生活漢字`, `學校` 등이 빈 박스로 출력되지 않음
 - **이미지**: 마크다운 파일 디렉터리 기준 상대 경로 자동 해석, `max-width: 100%`로 페이지 폭 초과 방지
 - **페이지 번호**: 꼬리말 `현재 / 전체` (기본 ON, 끄기 가능)
 - **수동 페이지 분할**: `<div class="page"></div>`로 임의 위치에서 페이지 나누기
@@ -48,6 +49,7 @@ python md2pdf.py input.md output.pdf
 | 본문 (regular) | NanumGothic-Regular.ttf | Google Fonts |
 | 본문 굵게 (bold) | NanumGothic-Bold.ttf | Google Fonts |
 | 코드 (monospace) | D2Coding.ttf | naver/d2codingfont 릴리스 zip에서 추출 |
+| 한자 (CJK fallback) | NotoSansKR-Regular.otf | notofonts/noto-cjk SubsetOTF/KR |
 
 이후 실행은 캐시된 파일을 그대로 사용합니다.
 
@@ -61,7 +63,7 @@ python md2pdf.py [옵션] input.md [output.pdf]
 |------|------|
 | `--webui` | Web UI 서버 실행 |
 | `-p PORT`, `--port PORT` | Web UI 포트 (기본 5000) |
-| `--font PATH` | 모든 역할(regular/bold/code)에 단일 .ttf 강제 적용 |
+| `--font PATH` | 모든 역할(regular/bold/code/hanja)에 단일 .ttf 강제 적용 |
 | `--no-page-numbers` | 꼬리말 페이지 번호 숨기기 |
 | `--css PATH` | 추가 CSS 파일 (base 뒤로 cascade되어 부분 덮어쓰기) |
 
@@ -161,6 +163,7 @@ md2pdf/
     NanumGothic-Regular.ttf
     NanumGothic-Bold.ttf
     D2Coding.ttf
+    NotoSansKR-Regular.otf
   md2pdf.py
 ```
 
@@ -168,6 +171,7 @@ md2pdf/
 
 - NanumGothic Regular/Bold: https://fonts.google.com/specimen/Nanum+Gothic
 - D2Coding: https://github.com/naver/d2codingfont/releases
+- Noto Sans KR (한자 fallback): https://github.com/notofonts/noto-cjk/tree/main/Sans/SubsetOTF/KR
 
 ## Python API
 

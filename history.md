@@ -1,5 +1,35 @@
 # Change History
 
+## 2026-05-07 — 생활한자 지원 (Noto Sans KR fallback)
+
+본문에 한자(漢字, CJK Unified Ideographs)가 섞인 마크다운을 변환할 때 PDF에 빈 사각형(□, `.notdef` 글리프)으로 출력되던 문제 수정. 4번째 폰트 역할 `hanja`를 추가해 NanumGothic이 가지지 않은 한자 글리프를 Noto Sans KR이 채우도록 함.
+
+### 원인
+NanumGothic-Regular는 한글·라틴은 풍부하게 커버하지만 CJK Unified Ideographs(U+4E00–U+9FFF)는 0자. 따라서 `生活漢字`, `學校`, `家族` 같은 한자는 모두 missing-glyph 박스로 떨어짐. `生活漢字` 한 단어조차 PDF에 들어갈 수 없는 상태.
+
+### 수정 (`md2pdf.py`)
+- `FONT_RESOURCES`에 `hanja` 항목 추가:
+  - 파일명: `NotoSansKR-Regular.otf` (4.6 MB Subset OTF)
+  - 출처: `notofonts/noto-cjk` 저장소(`Sans2.004` 태그)의 `Sans/SubsetOTF/KR/`
+  - SHA256 검증: `69975a0a...148d68`
+  - 한국 SubsetOTF는 약 8.1k개의 CJK Unified Ideographs(상용 한자 거의 전부) + CJK Compatibility Ideographs 335/512자 커버
+- `_build_css()`에 4번째 `@font-face` (`'Noto Sans KR'`) 추가
+- `body`/`code`/`pre`의 `font-family` 체인에 `'Noto Sans KR'`을 NanumGothic·D2Coding **뒤**에 배치 → HarfBuzz가 글리프 단위로 fallback하므로 한글·라틴은 NanumGothic 그대로 유지, 한자만 Noto로 떨어짐
+- `convert_md_to_pdf(font_path=...)` 단일-폰트 override 모드에서도 `hanja` 역할에 같은 파일을 매핑(KeyError 방지). 사용자가 자체 폰트를 넘기면 그 폰트의 한자 커버리지를 그대로 신뢰.
+
+### TDD
+- `TestEnsureFonts`: 역할 키 집합 `{regular, bold, code}` → `{regular, bold, code, hanja}` 확장, `test_hanja_resource_points_to_otf_with_sha256` 추가(스텁 URL/zero hash 방어)
+- `TestFontMultiWeight`: `@font-face` 최소 갯수 3 → 4, `test_noto_sans_kr_face_uses_hanja_uri`/`test_body_font_family_falls_back_to_noto_sans_kr`/`test_code_font_family_falls_back_to_noto_sans_kr` 3건 추가 — 폴백 순서까지 검증(NanumGothic 위치보다 Noto가 뒤에 오는지)
+- `TestConvertMdToPdf.test_explicit_font_path_also_fills_hanja_role` 추가: 단일-폰트 override가 4개 역할 URI 모두에 매핑되는지 회귀 방지
+- 기존 CSS 테스트 8건의 `font_uris` 픽스처에 `hanja` 키 추가
+
+### 검증
+- `python -m unittest test_md2pdf` → **152 tests OK**
+- 통합 테스트 `/tmp/hanja_test.md`(가족·신체·자연 카테고리, 한자 50자 이상):
+  - PDF 추출 텍스트에 `生活漢字`, `父`, `母`, `頭`, `天`, `學校`, `一二三四五`(코드 블록 안) 등 모두 정상 보존
+  - 임베디드 폰트: `NanumGothic`, `NanumGothic-Bold`, `D2Coding`, **`Noto-Sans-KR`** (subset, 4번째)
+  - 한글·한자 혼용 단어(`學校(학교)`)도 글리프 단위 fallback이 자연스럽게 동작
+
 ## 2026-05-07 — Python Web UI: 한글 파일명 보존
 
 `md2pdf.py --webui`에서 한글 `.md` 파일을 업로드해 변환 후 다운로드하면 PDF 파일명에서 한글이 사라지고 사실상 의미 없는 이름(`md.pdf` 등)으로 저장되던 버그 수정.
