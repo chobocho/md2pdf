@@ -66,6 +66,22 @@ FONT_RESOURCES: dict[str, FontResource] = {
         url="https://github.com/notofonts/noto-cjk/raw/refs/tags/Sans2.004/Sans/SubsetOTF/KR/NotoSansKR-Regular.otf",
         sha256="69975a0ac8472717870aefeab0a4d52739308d90856b9955313b2ad5e0148d68",
     ),
+    # Code-block Hanja fallback. The proportional 'hanja' face above gives
+    # each Hanja a different advance width, which destroys ASCII-art layouts
+    # (e.g. 장기판 board where every cell must occupy the same column count).
+    # Noto Sans Mono CJK KR is the monospace sibling: every CJK glyph has a
+    # fixed double-ASCII width, every ASCII glyph one column. Used only in
+    # the `<pre>` / `<code>` font-family chain so prose Hanja keeps the
+    # natural proportional look from 'Noto Sans KR'.
+    #
+    # 16 MB file — biggest of the bundled fonts. Acceptable as a one-time
+    # download since it covers the full CJK Unified range Korean readers
+    # might run into.
+    "hanja_mono": FontResource(
+        filename="NotoSansMonoCJKkr-Regular.otf",
+        url="https://github.com/notofonts/noto-cjk/raw/refs/tags/Sans2.004/Sans/Mono/NotoSansMonoCJKkr-Regular.otf",
+        sha256="d5afed9988a28ae96afb0f4791754d3c9f4f08d08477eb1a7d6e2d905679a472",
+    ),
 }
 
 # Backwards-compat module-level constants.
@@ -321,6 +337,12 @@ def _build_css(font_uris: dict, *, page_numbers: bool = True) -> str:
         font-weight: normal;
         font-style: normal;
     }}
+    @font-face {{
+        font-family: 'Noto Sans Mono CJK KR';
+        src: url('{font_uris["hanja_mono"]}') format('opentype');
+        font-weight: normal;
+        font-style: normal;
+    }}
 
     /* font-family lives on body (not `*`) so that `code`/`pre` overrides
        cascade to descendant spans via inheritance. A `* {{ font-family }}`
@@ -378,7 +400,7 @@ def _build_css(font_uris: dict, *, page_numbers: bool = True) -> str:
     }}
 
     code {{
-        font-family: 'D2Coding', 'NanumGothic', 'Noto Sans KR', Consolas, Menlo, monospace;
+        font-family: 'D2Coding', 'NanumGothic', 'Noto Sans Mono CJK KR', Consolas, Menlo, monospace;
         font-size: 85%;
         padding: 0.2em 0.4em;
         background-color: rgba(175, 184, 193, 0.2);
@@ -386,7 +408,7 @@ def _build_css(font_uris: dict, *, page_numbers: bool = True) -> str:
     }}
 
     pre {{
-        font-family: 'D2Coding', 'NanumGothic', 'Noto Sans KR', Consolas, Menlo, monospace;
+        font-family: 'D2Coding', 'NanumGothic', 'Noto Sans Mono CJK KR', Consolas, Menlo, monospace;
         background-color: #f6f8fa;
         padding: 16px;
         border-radius: 6px;
@@ -562,15 +584,17 @@ def convert_md_to_pdf(md_filepath, pdf_filepath, font_path=None, *, page_numbers
         font_path = Path(font_path)
         if not font_path.exists():
             raise FileNotFoundError(f"Font file not found: {font_path}")
-        # Single-font override mode: the same file plays all four roles
-        # (regular, bold, code, hanja). Users supplying their own font
-        # accept its glyph coverage as authoritative — we don't second-guess
-        # whether it actually contains Hanja.
+        # Single-font override mode: the same file plays all five roles
+        # (regular, bold, code, hanja, hanja_mono). Users supplying their
+        # own font accept its glyph coverage as authoritative — we don't
+        # second-guess whether it contains Hanja, and we don't try to swap
+        # in a separate monospace face for code blocks.
         font_paths = {
             "regular": font_path,
             "bold": font_path,
             "code": font_path,
             "hanja": font_path,
+            "hanja_mono": font_path,
         }
 
     font_uris = {

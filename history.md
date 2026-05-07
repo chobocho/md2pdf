@@ -1,5 +1,50 @@
 # Change History
 
+## 2026-05-07 — 코드 블록 한자 고정폭 (Noto Sans Mono CJK)
+
+코드 블록 안에 한자를 섞은 ASCII 아트(예: 장기판 將棋盤)가 정렬이 깨지던 문제 수정. 본문 한자용 Noto Sans KR은 가변폭이라 코드 그리드를 무너뜨려서, 5번째 폰트 역할 `hanja_mono`(Noto Sans Mono CJK KR)을 추가하고 `<pre>`/`<code>` 폰트 체인의 한자 폴백만 모노스페이스 CJK로 교체.
+
+### 원인
+직전 변경(생활한자 지원, `0e04aed`)에서 `code`/`pre` 폰트 체인 끝에 가변폭 `'Noto Sans KR'`을 끼워 넣어, 코드 블록 한자가 글리프마다 advance width가 달랐다. 결과:
+
+```
+1  ・ ・ ・ ・ 漢 ・ ・ ・ ・    ← 漢이 ・보다 좁아 컬럼 어긋남
+2  ・ ・ ・ 士 ・ 士 ・ ・ ・
+```
+
+`漢`(가변 폭) ≠ `・`(전각 폭) ≠ `士`(가변 폭) → 장기판 셀 정렬 불가.
+
+### 수정 (`md2pdf.py`)
+- `FONT_RESOURCES`에 5번째 역할 `hanja_mono` 추가:
+  - 파일명: `NotoSansMonoCJKkr-Regular.otf` (16.4 MB)
+  - 출처: `notofonts/noto-cjk` 저장소(`Sans2.004` 태그)의 `Sans/Mono/`
+  - SHA256: `d5afed99...79a472`
+  - 검증: `fontTools`로 advance width 확인 → 한자 1000 units, ASCII 500 units (정확히 2:1, 즉 한자=ASCII 2열)
+- `_build_css()`에 5번째 `@font-face` (`'Noto Sans Mono CJK KR'`) 추가
+- `code`/`pre` font-family에서 `'Noto Sans KR'`(가변폭) → `'Noto Sans Mono CJK KR'`(모노스페이스)로 교체. 새 체인:
+  - `'D2Coding', 'NanumGothic', 'Noto Sans Mono CJK KR', Consolas, Menlo, monospace`
+  - 한글·라틴은 D2Coding(2:1 비율), 한자는 Noto Mono CJK(역시 2:1) → 모두 ASCII 2열로 정렬
+- `body` font-family는 그대로 `'NanumGothic', 'Noto Sans KR', sans-serif` — 본문 한자는 가변폭 유지(미관)
+- `convert_md_to_pdf(font_path=...)` 단일-폰트 override 모드: `hanja_mono` 역할에도 같은 파일 매핑(KeyError 방지)
+
+### TDD
+- `TestEnsureFonts`: 역할 키 4개 → 5개 (`{regular, bold, code, hanja, hanja_mono}`), `test_hanja_mono_resource_points_to_otf_with_sha256` 추가
+- `TestFontMultiWeight`: `@font-face` 최소 갯수 4 → 5, 신규 4건 추가
+  - `test_noto_sans_mono_cjk_face_uses_hanja_mono_uri` — `@font-face` 존재 확인
+  - `test_code_font_family_uses_mono_cjk_for_hanja` — code 체인에 모노 CJK 명시
+  - `test_pre_font_family_uses_mono_cjk_for_hanja` — pre 체인에도 명시
+  - `test_body_font_family_does_not_use_mono_cjk` — body 체인엔 절대 안 들어가도록 보호(본문 한자가 모노로 새는 것 방지)
+- 기존 `test_code_font_family_falls_back_to_noto_sans_kr` 제거(가변 한자가 이제 코드 체인에 없으므로 의미 없음)
+- `TestConvertMdToPdf.test_explicit_font_path_also_fills_hanja_role` 갱신: 4 → 5 역할
+- 기존 CSS 테스트 9곳의 `font_uris` 픽스처에 `hanja_mono` 키 추가
+
+### 검증
+- `python -m unittest test_md2pdf` → **156 tests OK**
+- 통합 테스트 `/tmp/janggi_test.md`(장기판 10×9 그리드, 한자 12종 + `・` 다수):
+  - PDF 임베디드 폰트 5개: `NanumGothic`, `NanumGothic-Bold`, `D2Coding`, `Noto-Sans-KR`, **`Noto-Sans-Mono-CJK-KR`** (새로 추가)
+  - 글리프 advance width 검증: `漢`(1000) = `士`(1000) = `兵`(1000) = `・` 등 모든 CJK = 1000 units, ASCII = 500 units → 한자 셀이 정확히 ASCII 2열에 정렬
+  - 본문 한자(`學校(학교)`)는 그대로 가변폭 Noto Sans KR로 렌더 — 회귀 없음
+
 ## 2026-05-07 — 생활한자 지원 (Noto Sans KR fallback)
 
 본문에 한자(漢字, CJK Unified Ideographs)가 섞인 마크다운을 변환할 때 PDF에 빈 사각형(□, `.notdef` 글리프)으로 출력되던 문제 수정. 4번째 폰트 역할 `hanja`를 추가해 NanumGothic이 가지지 않은 한자 글리프를 Noto Sans KR이 채우도록 함.

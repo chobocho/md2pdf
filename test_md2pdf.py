@@ -236,9 +236,10 @@ class TestConvertMdToPdf(unittest.TestCase):
 
     def test_explicit_font_path_also_fills_hanja_role(self):
         """When the user passes `font_path=`, the same .ttf must play *all*
-        four roles (regular, bold, code, hanja) — otherwise _build_css would
-        KeyError on the missing 'hanja' URI. Users who supply an override
-        accept that font's coverage as authoritative."""
+        five roles (regular, bold, code, hanja, hanja_mono) — otherwise
+        _build_css would KeyError on a missing role URI. Users who supply
+        an override accept that font's coverage (Hangul + Hanja, mono or
+        not) as authoritative."""
         import md2pdf
         with tempfile.TemporaryDirectory() as tmpdir:
             md_file = os.path.join(tmpdir, "test.md")
@@ -261,11 +262,11 @@ class TestConvertMdToPdf(unittest.TestCase):
                 md2pdf.convert_md_to_pdf(md_file, out_pdf, font_path=fake_font)
 
             css_blob = "\n".join(captured_css)
-            # All four @font-face rules must point at the override URI.
-            self.assertGreaterEqual(css_blob.count("@font-face"), 4)
+            # All five @font-face rules must point at the override URI.
+            self.assertGreaterEqual(css_blob.count("@font-face"), 5)
             self.assertGreaterEqual(
-                css_blob.count(Path(fake_font).as_uri()), 4,
-                "All four font roles must resolve to the override path",
+                css_blob.count(Path(fake_font).as_uri()), 5,
+                "All five font roles must resolve to the override path",
             )
 
     def test_write_pdf_failure_raises_runtime_error(self):
@@ -322,6 +323,7 @@ class TestGitHubStyleCSS(unittest.TestCase):
             "bold": "file:///fake/bold.ttf",
             "code": "file:///fake/code.ttf",
             "hanja": "file:///fake/hanja.otf",
+            "hanja_mono": "file:///fake/hanja_mono.otf",
         })
 
     def _block(self, css, selector):
@@ -420,11 +422,13 @@ class TestGitHubStyleCSS(unittest.TestCase):
             "bold": "file:///custom/bold.ttf",
             "code": "file:///custom/code.ttf",
             "hanja": "file:///custom/hanja.otf",
+            "hanja_mono": "file:///custom/hanja_mono.otf",
         })
         self.assertIn("file:///custom/regular.ttf", css)
         self.assertIn("file:///custom/bold.ttf", css)
         self.assertIn("file:///custom/code.ttf", css)
         self.assertIn("file:///custom/hanja.otf", css)
+        self.assertIn("file:///custom/hanja_mono.otf", css)
 
 
 class TestPygmentsHighlighting(unittest.TestCase):
@@ -437,6 +441,7 @@ class TestPygmentsHighlighting(unittest.TestCase):
             "bold": "file:///x.ttf",
             "code": "file:///x.ttf",
             "hanja": "file:///x.otf",
+            "hanja_mono": "file:///x.otf",
         })
         self.assertIn(".codehilite", css)
         # .k = Keyword token class, .s = String token class.
@@ -505,6 +510,7 @@ class TestMonospaceFontInheritance(unittest.TestCase):
             "bold": "file:///b.ttf",
             "code": "file:///c.ttf",
             "hanja": "file:///h.otf",
+            "hanja_mono": "file:///hm.otf",
         })
 
     def _block(self, css, selector):
@@ -631,6 +637,7 @@ class TestManualPageBreak(unittest.TestCase):
             "bold": "file:///b.ttf",
             "code": "file:///c.ttf",
             "hanja": "file:///h.otf",
+            "hanja_mono": "file:///hm.otf",
         })
 
     def test_page_class_has_break_after_rule(self):
@@ -740,6 +747,7 @@ class TestFootnotes(unittest.TestCase):
             "bold": "file:///b.ttf",
             "code": "file:///c.ttf",
             "hanja": "file:///h.otf",
+            "hanja_mono": "file:///hm.otf",
         })
         # `.footnote` selector exists with smaller font
         m = re.search(r"\.footnote\s*\{([^}]+)\}", css)
@@ -834,6 +842,7 @@ class TestTaskListCSS(unittest.TestCase):
             "bold": "file:///b.ttf",
             "code": "file:///c.ttf",
             "hanja": "file:///h.otf",
+            "hanja_mono": "file:///hm.otf",
         })
 
     def test_taskbox_rule_exists(self):
@@ -867,6 +876,7 @@ class TestPageNumbers(unittest.TestCase):
                 "bold": "file:///b.ttf",
                 "code": "file:///c.ttf",
                 "hanja": "file:///h.otf",
+                "hanja_mono": "file:///hm.otf",
             },
             **kwargs,
         )
@@ -932,6 +942,7 @@ class TestImagesAndBaseUrl(unittest.TestCase):
             "bold": "file:///b.ttf",
             "code": "file:///c.ttf",
             "hanja": "file:///h.otf",
+            "hanja_mono": "file:///hm.otf",
         })
 
     def _block(self, css, selector):
@@ -993,11 +1004,13 @@ class TestFontMultiWeight(unittest.TestCase):
             "bold": "file:///fake/bold.ttf",
             "code": "file:///fake/code.ttf",
             "hanja": "file:///fake/hanja.otf",
+            "hanja_mono": "file:///fake/hanja_mono.otf",
         })
 
-    def test_at_least_four_font_face_rules(self):
-        # Regular + Bold NanumGothic + D2Coding + Noto Sans KR (Hanja fallback).
-        self.assertGreaterEqual(self._css().count("@font-face"), 4)
+    def test_at_least_five_font_face_rules(self):
+        # Regular + Bold NanumGothic + D2Coding + Noto Sans KR (body Hanja)
+        # + Noto Sans Mono CJK KR (code-block Hanja, fixed width).
+        self.assertGreaterEqual(self._css().count("@font-face"), 5)
 
     def test_nanumgothic_normal_weight_uses_regular_uri(self):
         block = re.search(
@@ -1060,23 +1073,57 @@ class TestFontMultiWeight(unittest.TestCase):
             "NanumGothic and only Hanja falls through to Noto",
         )
 
-    def test_code_font_family_falls_back_to_noto_sans_kr(self):
-        """Same per-glyph fallback applies inside `<code>`/`<pre>` — Hanja
-        appearing in code samples must not render as boxes either."""
+    def test_noto_sans_mono_cjk_face_uses_hanja_mono_uri(self):
+        """Code-block Hanja fallback face. NanumGothic and D2Coding both lack
+        CJK Unified Ideographs, and the proportional 'Noto Sans KR' assigns
+        each Hanja a different advance width — which breaks ASCII-art
+        layouts like 장기판(Korean chess board) where every cell must occupy
+        the same column count. Noto Sans Mono CJK gives every CJK glyph a
+        fixed double-ASCII width."""
+        block = re.search(
+            r"@font-face\s*\{[^}]*?'Noto Sans Mono CJK KR'[^}]*?\}",
+            self._css(), re.DOTALL,
+        )
+        self.assertIsNotNone(
+            block, "Need a 'Noto Sans Mono CJK KR' @font-face for code Hanja"
+        )
+        self.assertIn("file:///fake/hanja_mono.otf", block.group(0))
+
+    def test_code_font_family_uses_mono_cjk_for_hanja(self):
+        """Inside `<code>`, the chain must include 'Noto Sans Mono CJK KR'
+        so Hanja in code blocks render at fixed double-width and ASCII grids
+        stay aligned."""
         m = re.search(r"(?:^|\})\s*code\s*\{([^}]+)\}", self._css(), re.MULTILINE)
         self.assertIsNotNone(m)
-        self.assertIn("Noto Sans KR", m.group(1))
+        self.assertIn("Noto Sans Mono CJK KR", m.group(1))
+
+    def test_pre_font_family_uses_mono_cjk_for_hanja(self):
+        """Same for `<pre>` (code blocks own their font-family rule rather
+        than inheriting from <code>, so we have to set it on both)."""
+        m = re.search(r"(?:^|\})\s*pre\s*\{([^}]+)\}", self._css(), re.MULTILINE)
+        self.assertIsNotNone(m)
+        self.assertIn("Noto Sans Mono CJK KR", m.group(1))
+
+    def test_body_font_family_does_not_use_mono_cjk(self):
+        """Prose Hanja stays on the proportional 'Noto Sans KR'. The Mono CJK
+        face is monospace by design (each glyph 2× ASCII width), which would
+        space body Hanja unnaturally wide if it leaked into the body chain."""
+        m = re.search(
+            r"(?:^|\})\s*body\s*\{([^}]+)\}", self._css(), re.MULTILINE
+        )
+        self.assertIsNotNone(m)
+        self.assertNotIn("Noto Sans Mono CJK KR", m.group(1))
 
 
 class TestEnsureFonts(unittest.TestCase):
     """ensure_fonts() must handle direct .ttf and zip-archived sources, with
     SHA256 verification before any disk write."""
 
-    def test_resources_have_four_known_roles(self):
+    def test_resources_have_five_known_roles(self):
         import md2pdf
         self.assertEqual(
             set(md2pdf.FONT_RESOURCES.keys()),
-            {"regular", "bold", "code", "hanja"},
+            {"regular", "bold", "code", "hanja", "hanja_mono"},
         )
 
     def test_hanja_resource_points_to_otf_with_sha256(self):
@@ -1084,6 +1131,17 @@ class TestEnsureFonts(unittest.TestCase):
         Guard against accidentally landing a stub URL or zero hash."""
         import md2pdf
         spec = md2pdf.FONT_RESOURCES["hanja"]
+        self.assertTrue(spec.filename.endswith(".otf") or spec.filename.endswith(".ttf"))
+        self.assertTrue(spec.url.startswith("http"))
+        self.assertRegex(spec.sha256, r"^[0-9a-f]{64}$")
+        self.assertNotEqual(spec.sha256, "0" * 64)
+
+    def test_hanja_mono_resource_points_to_otf_with_sha256(self):
+        """Same guard for the monospace CJK fallback. This file is sizable
+        (~16 MB), so a stub URL would silently break code-block Hanja
+        alignment without any download error."""
+        import md2pdf
+        spec = md2pdf.FONT_RESOURCES["hanja_mono"]
         self.assertTrue(spec.filename.endswith(".otf") or spec.filename.endswith(".ttf"))
         self.assertTrue(spec.url.startswith("http"))
         self.assertRegex(spec.sha256, r"^[0-9a-f]{64}$")
@@ -1101,7 +1159,8 @@ class TestEnsureFonts(unittest.TestCase):
 
             mock_open.assert_not_called()
             self.assertEqual(
-                set(paths.keys()), {"regular", "bold", "code", "hanja"}
+                set(paths.keys()),
+                {"regular", "bold", "code", "hanja", "hanja_mono"},
             )
 
     def test_downloads_plain_and_extracts_zip_member(self):
