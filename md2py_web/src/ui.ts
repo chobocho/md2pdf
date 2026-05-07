@@ -77,6 +77,7 @@ f.addEventListener('submit', async (e) => {
   if (!/\\.(md|markdown)$/i.test(file.name)) {
     showError('Markdown(.md) 파일만 업로드할 수 있습니다: ' + file.name); return;
   }
+  const stem = file.name.replace(/\\.(md|markdown)$/i, '') || 'document';
   let text;
   try { text = await file.text(); }
   catch (err) { showError('파일을 읽지 못했습니다: ' + err); return; }
@@ -85,7 +86,7 @@ f.addEventListener('submit', async (e) => {
     const resp = await fetch('/convert', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ markdown: text, title: file.name }),
+      body: JSON.stringify({ markdown: text, title: stem }),
     });
     const data = await resp.json();
     if (!resp.ok) {
@@ -94,6 +95,10 @@ f.addEventListener('submit', async (e) => {
     }
     okBox.textContent = '변환 완료. 아래 미리보기에서 확인하거나 인쇄하세요.';
     okBox.style.display = 'block';
+    // Chromium uses the iframe element's name attribute as the suggested
+    // filename when printing a sub-frame to PDF. Setting it preserves Korean
+    // characters that would otherwise be lost in the Save-as dialog.
+    preview.name = stem;
     const blob = new Blob([data.html], { type: 'text/html' });
     preview.src = URL.createObjectURL(blob);
     preview.style.display = 'block';

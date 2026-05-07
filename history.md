@@ -1,5 +1,23 @@
 # Change History
 
+## 2026-05-07 — Web UI: 한글 파일명 PDF 저장 시 보존
+
+`md2py_web`에서 한글이 포함된 `.md` 파일을 변환 후 "인쇄 → PDF 저장" 시 기본 파일명에서 한글이 사라지던 문제 수정.
+
+### 원인
+- UI가 `file.name` 전체(`한글파일.md`)를 iframe `<title>`로 사용 → 저장 파일명이 `한글파일.md.pdf` 형태가 됨.
+- iframe src가 `blob:` URL이라 Chromium이 sub-frame 인쇄 시 제안 파일명을 iframe element의 `name` 속성에서 가져오려 하지만 비어 있음 → URL slug fallback에서 한글 소실.
+
+### 수정 (`md2py_web/src/ui.ts`)
+- `file.name`에서 확장자 제거한 `stem` 계산(빈 문자열이면 `'document'` fallback).
+- 서버에 `title: stem` 전달 → 저장 파일명이 `한글파일.pdf`로 정상화.
+- blob 할당 직전 `preview.name = stem` 설정 → Chromium이 sub-frame 인쇄 파일명을 안정적으로 채택.
+
+### TDD
+- `md2py_web/tests/ui.test.ts` 신규 4건(stem 정규식, `title: stem`, `preview.name = stem`, `'document'` fallback) RED → 구현 후 GREEN, 전체 49건 통과.
+
+상세는 [`md2py_web/history.md`](./md2py_web/history.md) 참조.
+
 ## 2026-05-06 — 빈 첫 페이지 버그 수정 (선두 `\newpage` 무시)
 
 ### 증상

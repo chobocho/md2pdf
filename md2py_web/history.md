@@ -1,5 +1,29 @@
 # Change History — md2py_web
 
+## 2026-05-07 — 한글 파일명 보존 (PDF 저장 시 파일명 유지)
+
+### 증상
+Web UI에서 한글이 포함된 `.md` 파일(예: `한글파일.md`)을 업로드해 변환 후 "브라우저에서 인쇄 → PDF 저장"을 누르면, 저장 다이얼로그의 기본 파일명에서 한글이 사라지거나 익명의 blob UUID가 제안됨. 결과적으로 사용자는 매번 파일명을 직접 다시 타이핑해야 했음.
+
+### 원인
+1. UI가 `title`로 **파일명 전체**(`한글파일.md`)를 서버에 보내, iframe `<title>`이 `한글파일.md`로 설정됨 — 저장 시 `.md`가 본문에 끼어 들어가 `한글파일.md.pdf` 형태가 됨.
+2. iframe의 src가 `URL.createObjectURL(blob)`로 만든 `blob:...UUID` URL이라, Chromium이 인쇄 대상 sub-frame의 제안 파일명을 결정할 때 iframe document의 `<title>` 대신 URL slug나 iframe element의 `name` 속성에 의존하는 경로로 빠지면서 한글이 누락됨.
+3. iframe element의 `name` 속성이 비어 있어 fallback 경로에서도 의미 있는 이름을 얻을 수 없음.
+
+### 수정 (`src/ui.ts`)
+1. `file.name`에서 `\.(md|markdown)$` 확장자를 제거한 `stem`을 계산. 빈 문자열이면 `'document'`로 fallback.
+2. POST `/convert` 본문의 `title`로 **stem만** 전달 → iframe `<title>`이 `한글파일`로 설정되어 저장 파일명이 `한글파일.pdf`가 됨.
+3. blob URL 할당 직전에 `preview.name = stem` 설정 → Chromium의 sub-frame 인쇄 파일명 결정 우선순위에서 가장 안정적인 소스(iframe element의 `name`)에 한글 stem을 직접 주입.
+
+### TDD
+1. `tests/ui.test.ts` 신규 4건 (RED 4):
+   - `.md`/`.markdown` 확장자 strip 정규식 존재
+   - `title: stem` 전송
+   - `preview.name = stem` 설정
+   - `... || 'document'` fallback
+2. `ui.ts` 수정 후 GREEN, 전체 49건 회귀 없음 (기존 45건 + 신규 4건).
+3. 라이브 스모크: `node dist/src/index.js --webui -p 5901` 후 `curl /` 응답에서 `stem` 계산, `title: stem` 본문, `preview.name = stem` 모두 노출 확인.
+
 ## 2026-04-10 — Initial TypeScript port of md2pdf
 
 ### Goal
