@@ -22,14 +22,31 @@ test("UI sends the filename stem (not full filename) as title", () => {
   );
 });
 
-test("UI assigns the iframe `name` attribute to the filename stem", () => {
-  // Chromium uses the iframe element's `name` attribute as the suggested
-  // filename when printing a sub-frame to PDF. Setting it ensures Korean
-  // filenames survive the Save-as dialog.
-  assert.match(
+test("UI does NOT assign the iframe `name` to the stem (Chromium sanitizes non-ASCII to `_`)", () => {
+  // Setting iframe.name to a Korean stem causes Chromium to replace every
+  // non-ASCII character with `_` when computing the print filename, which
+  // collapses 한글파일 → `_.pdf`. The iframe document's <title> is the
+  // correct filename source and must not be shadowed by `name`.
+  assert.doesNotMatch(
     UI_HTML,
     /preview\.name\s*=\s*stem/,
-    "expected `preview.name = stem` to be set before printing"
+    "preview.name must not be assigned the stem (Korean → `_` sanitization)"
+  );
+});
+
+test("UI uses srcdoc (not blob URL) so the iframe <title> drives the print filename", () => {
+  // Loading via blob: URL makes Chromium fall back to URL-based filename
+  // hints. With srcdoc, the iframe is same-origin to the parent and the
+  // iframe document's <title> is used as the suggested PDF filename.
+  assert.match(
+    UI_HTML,
+    /preview\.srcdoc\s*=\s*data\.html/,
+    "expected `preview.srcdoc = data.html` for reliable Korean filename"
+  );
+  assert.doesNotMatch(
+    UI_HTML,
+    /URL\.createObjectURL/,
+    "blob URL approach must be removed in favor of srcdoc"
   );
 });
 

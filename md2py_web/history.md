@@ -1,5 +1,24 @@
 # Change History — md2py_web
 
+## 2026-05-07 (2) — 한글 파일명 `_` 한 글자로 붕괴되던 버그 재수정
+
+### 증상
+앞선 수정(`preview.name = stem`) 이후에도 한글 파일명을 가진 `.md`를 업로드하고 "브라우저에서 인쇄 → PDF 저장"을 누르면 저장 다이얼로그의 기본 파일명이 한글이 모두 사라진 채 `_.pdf` 한 글자로만 제안됨.
+
+### 원인
+Chromium은 iframe element의 `name` 속성을 인쇄 파일명으로 사용할 때 **비-ASCII 문자를 모두 `_`로 sanitize** 한다. 따라서 `한글파일`을 `preview.name`에 그대로 넣으면 `____` 가 되고 다시 연속 underscore가 축약되어 `_.pdf` 한 글자가 됨. 이전 커밋의 `preview.name = stem` 라인이 의도와는 반대로 한글 손실의 직접 원인이었다. 추가로 iframe src가 `blob:UUID` URL이라 Chromium이 파일명 결정 시 sanitize된 name 쪽 fallback 경로를 우선 시도하는 문제도 있었음.
+
+### 수정 (`src/ui.ts`)
+1. `preview.name = stem` 라인을 **삭제**. iframe element name이 비ASCII를 underscore로 치환하는 것이 한글 손실의 직접 원인이었음.
+2. `URL.createObjectURL(blob)` + `preview.src = ...` 조합을 `preview.srcdoc = data.html` 로 교체. srcdoc 모드에서는 iframe document가 부모와 명확히 same-origin으로 인식되어 Chromium이 iframe document의 `<title>`(이미 한글 stem이 들어 있음)을 인쇄 파일명 소스로 안정적으로 사용한다.
+
+### TDD
+1. `tests/ui.test.ts`:
+   - 기존 "preview.name = stem" assertion → "preview.name 을 stem 으로 설정하지 *않음*" 단언으로 교체 (RED)
+   - "preview.srcdoc = data.html 사용 + URL.createObjectURL 사용 안 함" 신규 단언 (RED)
+2. `ui.ts` 수정 후 GREEN. 전체 50건 (기존 49 → name assertion 1건 폴라리티 반전 + srcdoc 신규 1건) 통과, 회귀 없음.
+3. 라이브 스모크: `node dist/src/index.js --webui -p 5907` 후 `curl /` 응답에 `preview.srcdoc = data.html` 노출, `URL.createObjectURL`·`preview.name = stem` 모두 부재 확인.
+
 ## 2026-05-07 — 한글 파일명 보존 (PDF 저장 시 파일명 유지)
 
 ### 증상

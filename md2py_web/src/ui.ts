@@ -95,12 +95,12 @@ f.addEventListener('submit', async (e) => {
     }
     okBox.textContent = '변환 완료. 아래 미리보기에서 확인하거나 인쇄하세요.';
     okBox.style.display = 'block';
-    // Chromium uses the iframe element's name attribute as the suggested
-    // filename when printing a sub-frame to PDF. Setting it preserves Korean
-    // characters that would otherwise be lost in the Save-as dialog.
-    preview.name = stem;
-    const blob = new Blob([data.html], { type: 'text/html' });
-    preview.src = URL.createObjectURL(blob);
+    // Use srcdoc instead of blob URL so the iframe is unambiguously same-origin
+    // to the parent and Chromium uses the iframe document's title (which
+    // holds the Korean stem) as the suggested PDF filename. Do NOT set
+    // iframe.name — Chromium sanitizes non-ASCII chars there to underscores,
+    // which collapses Korean filenames to a single underscore in the dialog.
+    preview.srcdoc = data.html;
     preview.style.display = 'block';
     printBtn.disabled = false;
   } catch (err) {
