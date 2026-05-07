@@ -7,6 +7,7 @@ import re
 import sys
 import tempfile
 import threading
+import unicodedata
 import urllib.request
 import zipfile
 from dataclasses import dataclass, field
@@ -990,10 +991,41 @@ FORM_TEMPLATE = """<!doctype html>
 """
 
 
+_UNSAFE_FILENAME_CHARS = set('<>:"|?*\x00/\\')
+
+
+def _safe_pdf_stem(filename: str) -> str:
+    """Derive a filesystem-safe PDF stem from a user-supplied filename,
+    preserving Unicode (Korean, CJK, etc.).
+
+    Werkzeug's `secure_filename()` NFKD-strips non-ASCII characters, so a
+    Korean stem like '한국어' collapses to '' and the downloaded PDF ends
+    up named 'md.pdf' or similar — useless to the user. This helper keeps
+    the original characters but still:
+
+      - drops any path prefix (`/`, `\\`),
+      - strips one trailing extension (`.md` / `.markdown` / etc.),
+      - removes characters illegal in filenames on common OSes
+        (`<>:"|?*` and NUL), and
+      - removes Unicode control characters.
+
+    Returns 'document' if nothing safe survives.
+    """
+    if not filename:
+        return "document"
+    base = filename.replace("\\", "/").rsplit("/", 1)[-1]
+    stem = base.rsplit(".", 1)[0] if "." in base else base
+    cleaned = "".join(
+        ch for ch in stem
+        if ch not in _UNSAFE_FILENAME_CHARS
+        and unicodedata.category(ch)[0] != "C"
+    ).strip().strip(".")
+    return cleaned or "document"
+
+
 def create_app():
     """Flask app factory for the md2pdf web UI."""
     from flask import Flask, render_template_string, request, send_file
-    from werkzeug.utils import secure_filename
 
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16 MB upload cap
@@ -1010,11 +1042,21 @@ def create_app():
             print(f"[webui] {msg}", file=sys.stderr)
             return render_template_string(FORM_TEMPLATE, error=msg), 400
 
-        name = secure_filename(f.filename) or "upload.md"
-        if not name.lower().endswith((".md", ".markdown")):
-            msg = f"Markdown 파일(.md)만 업로드할 수 있습니다: {f.filename}"
+        original = f.filename
+        lower = original.lower()
+        if lower.endswith(".markdown"):
+            ext = ".markdown"
+        elif lower.endswith(".md"):
+            ext = ".md"
+        else:
+            msg = f"Markdown 파일(.md)만 업로드할 수 있습니다: {original}"
             print(f"[webui] {msg}", file=sys.stderr)
             return render_template_string(FORM_TEMPLATE, error=msg), 400
+
+        # Preserve the original (possibly Korean) stem for the download
+        # filename. The on-disk tempfile uses an ASCII-safe name since its
+        # name doesn't affect the output.
+        stem = _safe_pdf_stem(original)
 
         # Browser submits checked checkboxes only; absence == unchecked
         page_numbers = request.form.get("page_numbers") == "on"
@@ -1024,8 +1066,8 @@ def create_app():
         css_upload = request.files.get("custom_css")
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            md_path = Path(tmpdir) / name
-            pdf_path = md_path.with_suffix(".pdf")
+            md_path = Path(tmpdir) / f"upload{ext}"
+            pdf_path = Path(tmpdir) / "output.pdf"
             f.save(md_path)
 
             custom_css_path = None
@@ -1052,11 +1094,14 @@ def create_app():
 
             pdf_bytes = pdf_path.read_bytes()
 
+        # Flask/werkzeug encodes non-ASCII `download_name` per RFC 5987
+        # (`filename*=UTF-8''<percent-encoded>`); the form's JS handler
+        # decodes that back into the Korean original.
         return send_file(
             io.BytesIO(pdf_bytes),
             mimetype="application/pdf",
             as_attachment=True,
-            download_name=pdf_path.name,
+            download_name=f"{stem}.pdf",
         )
 
     return app

@@ -1416,6 +1416,126 @@ class TestWebUI(unittest.TestCase):
         self.assertIn("boom", body)
 
 
+class TestSafePdfStem(unittest.TestCase):
+    """Korean / non-ASCII filenames must survive into the downloaded PDF
+    name. Werkzeug's `secure_filename()` NFKD-strips non-ASCII characters,
+    so a Korean stem like '한국어' collapses to '' (and the resulting PDF
+    becomes 'md.pdf' or similar). `_safe_pdf_stem` preserves Unicode while
+    still stripping path separators and characters illegal in filenames."""
+
+    def test_preserves_korean_stem(self):
+        import md2pdf
+        self.assertEqual(md2pdf._safe_pdf_stem("한국어.md"), "한국어")
+
+    def test_preserves_korean_with_spaces(self):
+        import md2pdf
+        self.assertEqual(md2pdf._safe_pdf_stem("한 글.md"), "한 글")
+
+    def test_strips_md_extension(self):
+        import md2pdf
+        self.assertEqual(md2pdf._safe_pdf_stem("doc.md"), "doc")
+
+    def test_strips_markdown_extension(self):
+        import md2pdf
+        self.assertEqual(md2pdf._safe_pdf_stem("doc.markdown"), "doc")
+
+    def test_strips_uppercase_extension(self):
+        import md2pdf
+        self.assertEqual(md2pdf._safe_pdf_stem("한국어.MD"), "한국어")
+
+    def test_strips_unix_path_separator(self):
+        import md2pdf
+        self.assertEqual(md2pdf._safe_pdf_stem("../한국어.md"), "한국어")
+
+    def test_strips_windows_path_separator(self):
+        import md2pdf
+        self.assertEqual(md2pdf._safe_pdf_stem(r"C:\folder\한국어.md"), "한국어")
+
+    def test_empty_returns_document(self):
+        import md2pdf
+        self.assertEqual(md2pdf._safe_pdf_stem(""), "document")
+
+    def test_dot_only_stem_returns_document(self):
+        """`.md` (no stem) and `..md` (only dots before ext) collapse to
+        the safe fallback rather than producing `.pdf` or `..pdf`."""
+        import md2pdf
+        self.assertEqual(md2pdf._safe_pdf_stem(".md"), "document")
+        self.assertEqual(md2pdf._safe_pdf_stem("..md"), "document")
+
+    def test_strips_unsafe_filename_chars(self):
+        """Windows forbids `<>:"|?*` in filenames; strip them so the user
+        can save the PDF on any OS without renaming."""
+        import md2pdf
+        self.assertEqual(md2pdf._safe_pdf_stem('한<국>어.md'), "한국어")
+
+    def test_strips_control_chars(self):
+        import md2pdf
+        self.assertEqual(md2pdf._safe_pdf_stem("한\x00국\x07어.md"), "한국어")
+
+
+class TestWebUIKoreanFilename(unittest.TestCase):
+    """End-to-end: a Korean-named upload must come back as a Korean-named
+    PDF via Content-Disposition's RFC 5987 `filename*` field. Regression
+    for the bug where Korean stems collapsed to a single ASCII character."""
+
+    def setUp(self):
+        import md2pdf
+        self.md2pdf = md2pdf
+        self.app = md2pdf.create_app()
+        self.client = self.app.test_client()
+
+    def _post(self, filename: str):
+        def fake_convert(md_path, pdf_path, font_path=None, **kwargs):
+            Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
+            return Path(pdf_path)
+        with mock.patch("md2pdf.convert_md_to_pdf", side_effect=fake_convert):
+            data = {"file": (io.BytesIO(b"# hi"), filename)}
+            return self.client.post(
+                "/convert", data=data, content_type="multipart/form-data"
+            )
+
+    def test_korean_filename_preserved_in_disposition(self):
+        from urllib.parse import quote
+        resp = self._post("한국어.md")
+        self.assertEqual(resp.status_code, 200)
+        cd = resp.headers.get("Content-Disposition", "")
+        self.assertIn("filename*=UTF-8''", cd)
+        self.assertIn(quote("한국어.pdf", safe="!#$&+-.^_`|~"), cd)
+
+    def test_korean_filename_with_space_preserved(self):
+        from urllib.parse import quote
+        resp = self._post("한 글.md")
+        self.assertEqual(resp.status_code, 200)
+        cd = resp.headers.get("Content-Disposition", "")
+        self.assertIn("filename*=UTF-8''", cd)
+        self.assertIn(quote("한 글.pdf", safe="!#$&+-.^_`|~"), cd)
+
+    def test_ascii_filename_still_works(self):
+        """Regression: doc.md still produces doc.pdf in the header."""
+        resp = self._post("doc.md")
+        self.assertEqual(resp.status_code, 200)
+        cd = resp.headers.get("Content-Disposition", "")
+        self.assertIn("doc.pdf", cd)
+
+    def test_markdown_extension_with_korean_name(self):
+        resp = self._post("한국어.markdown")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_uppercase_md_extension_accepted(self):
+        resp = self._post("한국어.MD")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_path_traversal_in_filename_stripped(self):
+        from urllib.parse import quote
+        resp = self._post("../한국어.md")
+        self.assertEqual(resp.status_code, 200)
+        cd = resp.headers.get("Content-Disposition", "")
+        # The "../" prefix must not appear in the encoded filename;
+        # only the Korean stem survives.
+        self.assertIn(quote("한국어.pdf", safe="!#$&+-.^_`|~"), cd)
+        self.assertNotIn("..", cd)
+
+
 class TestYamlFrontmatterStripping(unittest.TestCase):
     """Pandoc-style YAML metadata blocks (`---\\n...\\n---\\n` at the very
     top of the file) must be stripped before python-markdown sees the text;

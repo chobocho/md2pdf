@@ -1,5 +1,23 @@
 # Change History
 
+## 2026-05-07 — Python Web UI: 한글 파일명 보존
+
+`md2pdf.py --webui`에서 한글 `.md` 파일을 업로드해 변환 후 다운로드하면 PDF 파일명에서 한글이 사라지고 사실상 의미 없는 이름(`md.pdf` 등)으로 저장되던 버그 수정.
+
+### 원인
+`/convert` 라우트가 werkzeug의 `secure_filename`으로 업로드 파일명을 정규화하고 있었음. 이 함수는 NFKD 정규화 → ASCII 인코딩 (`errors="ignore"`) 단계에서 한글을 통째로 잘라낸다. 예: `secure_filename("한국어.md")` → `"md"` → `Path.with_suffix(".pdf")` → `md.pdf`.
+
+이전 커밋(`a0d238d`, `7326301`)은 사용자가 원래 의도했던 Python 웹 UI가 아니라 별도 TypeScript 프로젝트(`md2py_web/`)에 적용되어 있었음.
+
+### 수정 (`md2pdf.py`)
+- `_safe_pdf_stem(filename)` 헬퍼 추가: 경로 구분자(`/`, `\\`)·확장자·파일명 금지 문자(`<>:"|?*\x00`)·유니코드 제어 문자만 제거하고 한글 등 비-ASCII는 보존. 안전하게 남는 게 없으면 `'document'` 반환.
+- `convert()` 라우트에서 `secure_filename` 제거. 확장자(`.md`/`.markdown`)는 원본 소문자 비교로 검증, 다운로드용 stem만 `_safe_pdf_stem`으로 산출.
+- 임시 파일 디스크 이름은 `upload.md` / `output.pdf` 고정 — 출력 파일명에 영향 없음.
+- `send_file(download_name=f"{stem}.pdf")`: Flask/werkzeug가 비-ASCII를 RFC 5987(`filename*=UTF-8''<percent-encoded>`)로 자동 인코딩하며, 폼 JS 핸들러는 이미 해당 헤더를 디코드하도록 작성되어 있음.
+
+### TDD
+- `TestSafePdfStem` 11건 + `TestWebUIKoreanFilename` 6건 신규 추가 (RED → GREEN). 전체 147건 통과.
+
 ## 2026-05-07 — `md2py_web` 디렉터리 제거
 
 별도 Web UI 하위 프로젝트(`md2py_web/`)를 저장소에서 삭제. 핵심 CLI(`md2pdf.py`)에 집중하기 위함.
