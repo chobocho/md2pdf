@@ -26,6 +26,13 @@ except (ImportError, OSError):
     CSS = None
     FontConfiguration = None
 
+try:
+    from pypdf import PdfWriter
+except ImportError:
+    # Same rationale as the WeasyPrint guard: keep the module importable so
+    # CLI/argparse tests pass. Calls into merge_pdfs() raise a clear error.
+    PdfWriter = None
+
 @dataclass(frozen=True)
 class FontResource:
     """A bundled font we may need to download. If `archive_member` is set,
@@ -643,6 +650,56 @@ def convert_md_to_pdf(md_filepath, pdf_filepath, font_path=None, *, page_numbers
     return Path(pdf_filepath)
 
 
+def merge_pdfs(folder, output_name: str = "output.pdf"):
+    """Merge every `.pdf` in `folder` (sorted by filename) into a single PDF.
+
+    The output file is written into `folder` itself with name `output_name`.
+    If a file with that name already exists in the folder it is excluded
+    from the inputs so re-running the command is idempotent and never
+    appends a stale prior merge into itself.
+
+    Args:
+        folder: Directory containing the PDFs to merge.
+        output_name: Filename for the merged PDF (default: 'output.pdf').
+
+    Returns:
+        Path to the merged PDF.
+
+    Raises:
+        FileNotFoundError: `folder` does not exist.
+        NotADirectoryError: `folder` exists but is not a directory.
+        RuntimeError: No `.pdf` inputs found in `folder`, or pypdf missing.
+    """
+    folder_path = Path(folder)
+    if not folder_path.exists():
+        raise FileNotFoundError(f"Folder not found: {folder}")
+    if not folder_path.is_dir():
+        raise NotADirectoryError(f"Not a directory: {folder}")
+
+    out_path = folder_path / output_name
+    pdfs = sorted(
+        p for p in folder_path.iterdir()
+        if p.is_file() and p.suffix.lower() == ".pdf" and p.name != output_name
+    )
+    if not pdfs:
+        raise RuntimeError(f"No PDF files to merge in: {folder}")
+
+    if PdfWriter is None:
+        raise RuntimeError(
+            "pypdf is not installed. Install it with: pip install pypdf"
+        )
+
+    writer = PdfWriter()
+    try:
+        for pdf in pdfs:
+            writer.append(str(pdf))
+        writer.write(str(out_path))
+    finally:
+        writer.close()
+
+    return out_path
+
+
 FORM_TEMPLATE = """<!doctype html>
 <html lang="ko">
 <head>
@@ -1198,6 +1255,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Path to a custom CSS file. Loaded after the built-in stylesheet "
              "so its rules override matching base rules.",
     )
+    parser.add_argument(
+        "--merge",
+        metavar="FOLDER",
+        help="Merge every .pdf in FOLDER (sorted by name) into one PDF "
+             "written into FOLDER as --name (default: output.pdf).",
+    )
+    parser.add_argument(
+        "--name",
+        default="output.pdf",
+        help="Output filename used by --merge (default: output.pdf).",
+    )
     return parser
 
 
@@ -1208,6 +1276,18 @@ def main(argv=None) -> int:
     if args.webui:
         run_webui(port=args.port)
         return 0
+
+    if args.merge:
+        try:
+            result = merge_pdfs(args.merge, args.name)
+            print(f"Merged PDF saved: {result}")
+            return 0
+        except (FileNotFoundError, NotADirectoryError) as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
 
     if not args.input:
         parser.print_help()

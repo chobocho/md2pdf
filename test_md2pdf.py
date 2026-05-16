@@ -1830,5 +1830,173 @@ class TestLeadingPageBreakStripped(unittest.TestCase):
         self.assertIn('class="page"', html)
 
 
+class TestMergePdfsArgParser(unittest.TestCase):
+    """CLI parsing for the --merge / --name flags."""
+
+    def test_merge_flag_parsed(self):
+        import md2pdf
+        args = md2pdf._build_arg_parser().parse_args(["--merge", "/tmp/foo"])
+        self.assertEqual(args.merge, "/tmp/foo")
+
+    def test_default_name_is_output_pdf(self):
+        import md2pdf
+        args = md2pdf._build_arg_parser().parse_args(["--merge", "/tmp/foo"])
+        self.assertEqual(args.name, "output.pdf")
+
+    def test_custom_name_parsed(self):
+        import md2pdf
+        args = md2pdf._build_arg_parser().parse_args(
+            ["--merge", "/tmp/foo", "--name", "merged.pdf"]
+        )
+        self.assertEqual(args.name, "merged.pdf")
+
+    def test_main_dispatches_to_merge(self):
+        import md2pdf
+        with mock.patch("md2pdf.merge_pdfs") as mock_merge:
+            mock_merge.return_value = Path("/tmp/foo/output.pdf")
+            rc = md2pdf.main(["--merge", "/tmp/foo"])
+        mock_merge.assert_called_once_with("/tmp/foo", "output.pdf")
+        self.assertEqual(rc, 0)
+
+    def test_main_dispatches_to_merge_with_name(self):
+        import md2pdf
+        with mock.patch("md2pdf.merge_pdfs") as mock_merge:
+            mock_merge.return_value = Path("/tmp/foo/merged.pdf")
+            md2pdf.main(["--merge", "/tmp/foo", "--name", "merged.pdf"])
+        mock_merge.assert_called_once_with("/tmp/foo", "merged.pdf")
+
+
+class TestMergePdfs(unittest.TestCase):
+    """merge_pdfs() — combine all PDFs in a folder, sorted by name."""
+
+    def _make_pdf(self, path: Path, text: str = "x"):
+        """Render a tiny one-page PDF via WeasyPrint, or skip if unavailable."""
+        try:
+            from weasyprint import HTML
+        except (ImportError, OSError):
+            self.skipTest("WeasyPrint native libs missing")
+        HTML(string=f"<html><body><p>{text}</p></body></html>").write_pdf(str(path))
+
+    def test_missing_folder_raises_file_not_found(self):
+        import md2pdf
+        with self.assertRaises(FileNotFoundError):
+            md2pdf.merge_pdfs("/no/such/folder/__nope__")
+
+    def test_path_is_file_not_folder_raises(self):
+        import md2pdf
+        with tempfile.NamedTemporaryFile(suffix=".pdf") as f:
+            with self.assertRaises(NotADirectoryError):
+                md2pdf.merge_pdfs(f.name)
+
+    def test_empty_folder_raises_runtime_error(self):
+        import md2pdf
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaises(RuntimeError):
+                md2pdf.merge_pdfs(tmpdir)
+
+    def test_folder_with_no_pdfs_raises_runtime_error(self):
+        import md2pdf
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "notes.txt").write_text("not a pdf")
+            (Path(tmpdir) / "image.png").write_bytes(b"\x89PNG\r\n")
+            with self.assertRaises(RuntimeError):
+                md2pdf.merge_pdfs(tmpdir)
+
+    def test_sorts_pdfs_alphabetically_before_appending(self):
+        import md2pdf
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create files in non-alphabetical order so dir-listing order
+            # differs from name-sorted order on at least some filesystems.
+            for name in ["c.pdf", "a.pdf", "b.pdf"]:
+                (Path(tmpdir) / name).write_bytes(b"%PDF-1.4 stub")
+            with mock.patch("md2pdf.PdfWriter") as mock_writer_cls:
+                writer = mock_writer_cls.return_value
+                md2pdf.merge_pdfs(tmpdir)
+            appended = [
+                Path(call.args[0]).name for call in writer.append.call_args_list
+            ]
+            self.assertEqual(appended, ["a.pdf", "b.pdf", "c.pdf"])
+
+    def test_only_pdf_extension_files_are_merged(self):
+        import md2pdf
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "a.pdf").write_bytes(b"%PDF-1.4")
+            (Path(tmpdir) / "b.txt").write_text("ignore me")
+            (Path(tmpdir) / "c.pdf").write_bytes(b"%PDF-1.4")
+            with mock.patch("md2pdf.PdfWriter") as mock_writer_cls:
+                writer = mock_writer_cls.return_value
+                md2pdf.merge_pdfs(tmpdir)
+            appended = [
+                Path(call.args[0]).name for call in writer.append.call_args_list
+            ]
+            self.assertEqual(appended, ["a.pdf", "c.pdf"])
+
+    def test_default_output_name_is_output_pdf(self):
+        import md2pdf
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "a.pdf").write_bytes(b"%PDF-1.4")
+            with mock.patch("md2pdf.PdfWriter") as mock_writer_cls:
+                writer = mock_writer_cls.return_value
+                result = md2pdf.merge_pdfs(tmpdir)
+            self.assertEqual(Path(result).name, "output.pdf")
+            writer.write.assert_called_once()
+            written_to = Path(writer.write.call_args.args[0])
+            self.assertEqual(written_to.name, "output.pdf")
+            self.assertEqual(written_to.parent, Path(tmpdir))
+
+    def test_custom_output_name_used(self):
+        import md2pdf
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "a.pdf").write_bytes(b"%PDF-1.4")
+            with mock.patch("md2pdf.PdfWriter") as mock_writer_cls:
+                writer = mock_writer_cls.return_value
+                result = md2pdf.merge_pdfs(tmpdir, "merged.pdf")
+            self.assertEqual(Path(result).name, "merged.pdf")
+            written_to = Path(writer.write.call_args.args[0])
+            self.assertEqual(written_to.name, "merged.pdf")
+
+    def test_existing_output_file_excluded_from_merge_inputs(self):
+        """If the output filename already exists in the folder (e.g., from a
+        previous merge run), it must not be re-merged into itself."""
+        import md2pdf
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "a.pdf").write_bytes(b"%PDF-1.4")
+            (Path(tmpdir) / "b.pdf").write_bytes(b"%PDF-1.4")
+            (Path(tmpdir) / "output.pdf").write_bytes(b"%PDF-1.4 (stale)")
+            with mock.patch("md2pdf.PdfWriter") as mock_writer_cls:
+                writer = mock_writer_cls.return_value
+                md2pdf.merge_pdfs(tmpdir)
+            appended = [
+                Path(call.args[0]).name for call in writer.append.call_args_list
+            ]
+            self.assertEqual(appended, ["a.pdf", "b.pdf"])
+
+    def test_writer_closed_after_merge(self):
+        import md2pdf
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "a.pdf").write_bytes(b"%PDF-1.4")
+            with mock.patch("md2pdf.PdfWriter") as mock_writer_cls:
+                writer = mock_writer_cls.return_value
+                md2pdf.merge_pdfs(tmpdir)
+            writer.close.assert_called_once()
+
+    def test_real_merge_combines_page_counts(self):
+        """End-to-end: render three single-page PDFs, merge them, and verify
+        the result has three pages in the input order."""
+        import md2pdf
+        try:
+            from pypdf import PdfReader
+        except ImportError:
+            self.skipTest("pypdf not installed")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._make_pdf(Path(tmpdir) / "01.pdf", "first")
+            self._make_pdf(Path(tmpdir) / "02.pdf", "second")
+            self._make_pdf(Path(tmpdir) / "03.pdf", "third")
+            result = md2pdf.merge_pdfs(tmpdir)
+            self.assertTrue(result.exists())
+            reader = PdfReader(str(result))
+            self.assertEqual(len(reader.pages), 3)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -1,5 +1,36 @@
 # Change History
 
+## 2026-05-16 — `--merge` PDF 병합 기능 추가
+
+특정 폴더 안의 모든 `.pdf` 파일을 파일명 알파벳 순서로 정렬해 하나의 PDF로 합치는 CLI 기능 추가. 사용 예: `python md2pdf.py --merge ./chapters --name book.pdf`.
+
+### 설계
+- 새 함수 `merge_pdfs(folder, output_name="output.pdf")` — `pypdf.PdfWriter.append()` 사용
+- 정렬: `sorted()` 알파벳 순서 (Python 기본 codepoint 정렬). 자연 정렬이 필요하면 사용자가 `01.pdf`/`02.pdf`처럼 0-padding
+- 출력 파일은 입력 폴더 자체에 저장 → 사용자 멘탈 모델 ("이 폴더 머지" → "결과도 이 폴더") 일치
+- **자기 자신 제외**: 폴더 내 `output_name`과 일치하는 파일은 입력 목록에서 빠짐 → 같은 명령 재실행해도 누적 무한 증가 안 함 (idempotent)
+- `try/finally`로 `writer.close()` 보장 — 예외 시 fd 누수 방지
+
+### 수정 (`md2pdf.py`)
+- `from pypdf import PdfWriter` 모듈 임포트, `ImportError` 가드 (WeasyPrint 가드와 동일 패턴 — 모듈 import 자체는 항상 성공해야 argparse 단위 테스트가 native lib 없이 돌아감)
+- `merge_pdfs()` 함수 신규
+- `_build_arg_parser()`에 `--merge FOLDER`, `--name NAME` (default `output.pdf`) 옵션 추가
+- `main()`에 `args.merge` 분기 — webui 다음, 일반 변환 앞에서 처리. `FileNotFoundError`/`NotADirectoryError`/`RuntimeError`를 각각 명확한 stderr 메시지로 전환
+
+### TDD
+- `TestMergePdfsArgParser` 5건: `--merge`/`--name` 파싱, default `output.pdf`, `main()` 디스패치
+- `TestMergePdfs` 11건: 없는 폴더(`FileNotFoundError`), 파일 경로(`NotADirectoryError`), 빈 폴더·non-PDF만 있는 폴더(`RuntimeError`), 알파벳 정렬, 비-`.pdf` 제외, default 이름, 커스텀 이름, 자기 자신 제외(idempotent), `writer.close()` 호출 보장, 그리고 WeasyPrint로 1페이지 PDF 3개를 렌더해서 실제 합쳐 3페이지 PDF가 나오는지 확인하는 통합 테스트
+- 단위 테스트는 `mock.patch("md2pdf.PdfWriter")`로 pypdf 호출 자체는 mock — `writer.append` 호출 인자 순서/`writer.write` 경로/`writer.close` 호출을 직접 검증
+
+### 검증
+- `python -m unittest test_md2pdf` → **172 tests OK** (기존 156 + 신규 16)
+- 실 동작: a/b/c 단일 페이지 PDF 3개 → `output.pdf` 3페이지 (순서: a → b → c)
+- `--name combined.pdf` 동작 확인
+- 한글 폴더(`/tmp/한글폴더`)·한글 파일명(`가.pdf`, `나.pdf`)·한글 출력명(`결과.pdf`) 모두 정상
+- 없는 폴더 → `Error: Folder not found: ...` rc=1
+- 빈 폴더 → `Error: No PDF files to merge in: ...` rc=1
+- README에 기능/CLI 옵션/사용 예 추가, 의존성에 `pypdf` 추가
+
 ## 2026-05-07 — 코드 블록 한자 고정폭 (Noto Sans Mono CJK)
 
 코드 블록 안에 한자를 섞은 ASCII 아트(예: 장기판 將棋盤)가 정렬이 깨지던 문제 수정. 본문 한자용 Noto Sans KR은 가변폭이라 코드 그리드를 무너뜨려서, 5번째 폰트 역할 `hanja_mono`(Noto Sans Mono CJK KR)을 추가하고 `<pre>`/`<code>` 폰트 체인의 한자 폴백만 모노스페이스 CJK로 교체.

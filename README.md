@@ -18,15 +18,16 @@
   - 이모지 shortcode: `:rocket:` → 🚀 (코드 블록 안의 `:foo:`는 보존)
 - **커스텀 CSS**: 사용자 스타일시트로 base 규칙 부분 덮어쓰기
 - **Web UI**: 모바일 친화 디자인, 드래그&드롭 업로드, 변환 진행 스피너 overlay, 옵션 토글
+- **PDF 병합**: `--merge FOLDER`로 폴더 내 모든 `.pdf`를 이름순 정렬해 한 파일로 합치기 (기본 `output.pdf`, `--name`으로 변경)
 
 ## 요구 사항
 
 - Python 3.10+
-- weasyprint, markdown, pygments, emoji
+- weasyprint, markdown, pygments, emoji, pypdf
 - flask (Web UI 사용 시)
 
 ```bash
-pip install weasyprint markdown pygments emoji flask
+pip install weasyprint markdown pygments emoji pypdf flask
 ```
 
 > **Termux / Android 환경**: weasyprint 임포트 실패 시 tinycss2 업그레이드:
@@ -68,6 +69,8 @@ python md2pdf.py [옵션] input.md [output.pdf]
 | `--font PATH` | 모든 역할(regular/bold/code/hanja/hanja_mono)에 단일 .ttf 강제 적용 |
 | `--no-page-numbers` | 꼬리말 페이지 번호 숨기기 |
 | `--css PATH` | 추가 CSS 파일 (base 뒤로 cascade되어 부분 덮어쓰기) |
+| `--merge FOLDER` | FOLDER 안의 `.pdf` 파일들을 이름순 정렬해 한 파일로 병합 |
+| `--name NAME` | `--merge` 출력 파일명 (기본 `output.pdf`) |
 
 예:
 
@@ -81,6 +84,22 @@ python md2pdf.py doc.md --css my-theme.css
 # 둘 다
 python md2pdf.py doc.md --css my-theme.css --no-page-numbers
 ```
+
+## PDF 병합
+
+폴더 안의 모든 `.pdf` 파일을 파일명 알파벳 순서로 정렬해 하나의 PDF로 합칩니다. 결과 파일은 같은 폴더에 저장됩니다.
+
+```bash
+# /path/to/chapters/ 안의 모든 .pdf → /path/to/chapters/output.pdf
+python md2pdf.py --merge /path/to/chapters
+
+# 출력 파일명 지정 (같은 폴더에 저장)
+python md2pdf.py --merge /path/to/chapters --name book.pdf
+```
+
+- 정렬: `sorted()` 알파벳 순서. 숫자 자연 정렬이 필요하면 파일명을 `01.pdf`, `02.pdf`처럼 0-padding 하세요.
+- 출력 파일과 이름이 같은 입력은 자동 제외 → 같은 명령을 다시 실행해도 자기 자신을 입력으로 누적하지 않습니다.
+- 빈 폴더나 `.pdf`가 없는 폴더는 에러로 종료합니다.
 
 ## Web UI
 
